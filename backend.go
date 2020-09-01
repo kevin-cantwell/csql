@@ -30,6 +30,7 @@ type Cell interface {
 type Stream struct {
 	Columns []StreamColumn
 	Rows    <-chan []Cell
+	Err     error
 }
 
 type StreamColumn struct {
