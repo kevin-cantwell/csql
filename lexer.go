@@ -79,42 +79,47 @@ func (l *Lexer) scanWS() bool {
 
 // scans a quoted string literal
 func (l *Lexer) scanString() bool {
-	ch := l.read()
+	peek := l.peek()
 
-	switch ch {
-	case '\'', '"', '`':
+	switch peek {
+	case '\'', '"':
 	default:
-		l.unread()
 		return false
 	}
 
-	raw := []byte{ch}
+	quote := peek
+	prev := peek
+	for i := 1; ; i++ {
+		peek := l.peekAfter(i)
 
-	quote := ch
-	prev := ch
-	for {
-		ch := l.read()
-
-		switch ch {
+		switch peek {
 		case eof:
+			if l.err == nil {
+				l.err = fmt.Errorf("Unterminated quote at position %d", l.pos)
+			}
 			return false
 		case quote:
-			raw = append(raw, ch)
 			// if this is an unescaped terminating quote, then done
 			if prev != '\\' {
+				raw := l.readN(i + 1)
 				l.push(STRING, raw)
 				return true
 			}
-		default:
-			raw = append(raw, ch)
 		}
 
-		prev = ch
+		prev = peek
 	}
 }
 
 // scans a number literal
 func (l *Lexer) scanNumeric() bool {
+	peek := l.peek()
+
+	// fail fast
+	if peek != '-' && peek != '.' && !isDigit(peek) {
+		return false
+	}
+
 	// numbers cannot directly follow keywords or idents
 	prev := l.tok
 	switch {
@@ -158,6 +163,12 @@ func (l *Lexer) scanSymbol() bool {
 }
 
 func (l *Lexer) scanKeyword() bool {
+	// fail fast
+	peek := l.peek()
+	if !isLetter(peek) {
+		return false
+	}
+
 	for _, keyword := range keywords {
 		n := len([]byte(keyword.String()))
 
@@ -197,24 +208,52 @@ func (l *Lexer) scanKeyword() bool {
 	return false
 }
 
-func (l *Lexer) scanIdent() (val bool) {
+func (l *Lexer) scanIdent() bool {
+	peek := l.peek()
+	if peek == '`' {
+		return l.scanBacktickedIdent()
+	}
+
 	var raw []byte
-	for {
-		ch := l.read()
-		switch {
-		case ch == eof:
-			l.push(IDENT, raw)
-			return true
-		case isIdent(ch):
-			raw = append(raw, ch)
-		case len(raw) > 0:
-			l.unread()
-			l.push(IDENT, raw)
-			return true
-		default:
-			l.unread()
-			return false
+	for i := 0; ; i++ {
+		peek := l.peekAfter(i)
+		if isIdent(peek) {
+			raw = append(raw, peek)
+			continue
 		}
+		if len(raw) > 0 {
+			l.push(IDENT, l.readN(len(raw)))
+			return true
+		}
+		return false
+	}
+}
+
+func (l *Lexer) scanBacktickedIdent() bool {
+	if l.peek() != '`' {
+		return false
+	}
+
+	prev := byte('`')
+	for i := 1; ; i++ {
+		peek := l.peekAfter(i)
+
+		switch peek {
+		case eof:
+			if l.err == nil {
+				l.err = fmt.Errorf("Unterminated quote at position %d", l.pos)
+			}
+			return false
+		case '`':
+			// if this is an unescaped terminating quote, then done
+			if prev != '\\' {
+				raw := l.readN(i + 1)
+				l.push(IDENT, raw)
+				return true
+			}
+		}
+
+		prev = peek
 	}
 }
 

@@ -26,8 +26,7 @@ func main() {
 				break
 			}
 			if err != nil {
-				fmt.Print("\n")
-				log.Fatalf("%v", err)
+				panic(err)
 			}
 			table.Append([]string{tok.String(), fmt.Sprintf("%q", raw)})
 		}
