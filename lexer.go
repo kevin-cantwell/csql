@@ -17,24 +17,22 @@ const (
 // Lexer represents a lexical scanner.
 type Lexer struct {
 	r   *bufio.Reader
-	buf *tokenBuf
-	pos int
 	tok Token
 	raw []byte
+	pos int
 	err error
 }
 
 // NewLexer returns a new instance of Lexer.
 func NewLexer(r io.Reader) *Lexer {
 	return &Lexer{
-		r:   bufio.NewReader(r),
-		buf: &tokenBuf{},
+		r: bufio.NewReader(r),
 	}
 }
 
 // Scan returns the next token and literal value.
 func (l *Lexer) Scan() (Token, []byte, error) {
-	for _, scan := range []func() bool{
+	for _, scan := range []func() (Token, []byte, error){
 		l.scanEOF,
 		l.scanWS,
 		l.scanString,
@@ -43,67 +41,104 @@ func (l *Lexer) Scan() (Token, []byte, error) {
 		l.scanKeyword,
 		l.scanIdent,
 	} {
-		if scan() {
-			return l.tok, l.raw, nil
+		tok, raw, err := scan()
+		if err != nil {
+			peek, _ := l.peekN(10)
+			return ERROR, nil, fmt.Errorf("error at position %d: %q: %v", l.pos, peek, err)
 		}
+		if tok == SKIP {
+			continue
+		}
+		return tok, raw, nil
 	}
-	if l.err != nil {
-		return ILLEGAL, nil, l.err
-	}
-	return ILLEGAL, nil, fmt.Errorf("No legal token found at position %d", l.pos)
+	peek, _ := l.peekN(10)
+	return ERROR, nil, fmt.Errorf("illegal token found at position %d: %q", l.pos, peek)
 }
 
-func (l *Lexer) scanEOF() bool {
-	ch := l.read()
+func (l *Lexer) scanEOF() (Token, []byte, error) {
+	ch, err := l.read()
+	if err != nil {
+		return ERROR, nil, err
+	}
 
 	if ch != eof {
-		l.unread()
-		return false
+		if err := l.unread(); err != nil {
+			return ERROR, nil, err
+		}
+		return SKIP, nil, nil
 	}
 
-	l.push(EOF, []byte{eof})
-	return true
+	return EOF, []byte{eof}, nil
 }
 
-func (l *Lexer) scanWS() bool {
-	ch := l.read()
-
-	if !isWS(ch) {
-		l.unread()
-		return false
+func (l *Lexer) scanWS() (Token, []byte, error) {
+	ch, err := l.read()
+	if err != nil {
+		return ERROR, nil, err
 	}
 
-	l.push(WS, []byte{ch})
-	return true
+	if !isWS(ch) {
+		if err := l.unread(); err != nil {
+			return ERROR, nil, err
+		}
+		return SKIP, nil, nil
+	}
+
+	raw := []byte{ch}
+
+	for {
+		ch, err := l.read()
+		if err != nil {
+			return ERROR, nil, err
+		}
+
+		if ch == eof {
+			return WS, raw, nil
+		}
+
+		if !isWS(ch) {
+			if err := l.unread(); err != nil {
+				return ERROR, nil, err
+			}
+			return WS, raw, nil
+		}
+
+		raw = append(raw, ch)
+	}
 }
 
 // scans a quoted string literal
-func (l *Lexer) scanString() bool {
-	peek := l.peek()
+func (l *Lexer) scanString() (Token, []byte, error) {
+	peek, err := l.peek()
+	if err != nil {
+		return ERROR, nil, err
+	}
 
 	switch peek {
 	case '\'', '"':
 	default:
-		return false
+		return SKIP, nil, nil
 	}
 
 	quote := peek
 	prev := peek
 	for i := 1; ; i++ {
-		peek := l.peekAfter(i)
+		peek, err := l.peekAfter(i)
+		if err != nil {
+			return ERROR, nil, err
+		}
 
 		switch peek {
 		case eof:
-			if l.err == nil {
-				l.err = fmt.Errorf("Unterminated quote at position %d", l.pos)
-			}
-			return false
+			return ERROR, nil, fmt.Errorf("Unterminated quote")
 		case quote:
 			// if this is an unescaped terminating quote, then done
 			if prev != '\\' {
-				raw := l.readN(i + 1)
-				l.push(STRING, raw)
-				return true
+				raw, err := l.readN(i + 1)
+				if err != nil {
+					return ERROR, nil, err
+				}
+				return STRING, raw, nil
 			}
 		}
 
@@ -112,67 +147,85 @@ func (l *Lexer) scanString() bool {
 }
 
 // scans a number literal
-func (l *Lexer) scanNumeric() bool {
-	peek := l.peek()
+func (l *Lexer) scanNumeric() (Token, []byte, error) {
+	peek, err := l.peek()
+	if err != nil {
+		return ERROR, nil, err
+	}
 
 	// fail fast
 	if peek != '-' && peek != '.' && !isDigit(peek) {
-		return false
+		return SKIP, nil, nil
 	}
 
-	// numbers cannot directly follow keywords or idents
-	prev := l.tok
-	switch {
-	case isKeywordTok(prev), prev == IDENT:
-		return false
-	}
+	// // numbers cannot directly follow keywords or idents
+	// prev := l.tok
+	// switch {
+	// case isKeywordTok(prev), prev == IDENT:
+	// 	return SKIP, nil, nil
+	// }
 
 	var (
 		peeked []byte
 	)
 
 	for i := 0; ; i++ {
-		peek := l.peekAfter(i)
+		peek, err := l.peekAfter(i)
+		if err != nil {
+			return ERROR, nil, err
+		}
 		if peek != '-' && peek != '.' && !isDigit(peek) {
 			break
 		}
 		peeked = append(peeked, peek)
 	}
 
-	_, err := strconv.ParseFloat(string(peeked), 64)
+	if _, err := strconv.ParseFloat(string(peeked), 64); err != nil {
+		return SKIP, nil, nil
+	}
+
+	raw, err := l.readN(len(peeked))
 	if err != nil {
-		return false
+		return ERROR, nil, err
 	}
-
-	raw := l.readN(len(peeked))
-	l.push(NUMERIC, raw)
-	return true
+	return NUMERIC, raw, nil
 }
 
-func (l *Lexer) scanSymbol() bool {
-	ch := l.read()
-
-	tok, ok := symbols[ch]
-	if !ok {
-		l.unread()
-		return false
+func (l *Lexer) scanSymbol() (Token, []byte, error) {
+	ch, err := l.peek()
+	if err != nil {
+		return ERROR, nil, err
 	}
 
-	l.push(tok, []byte{ch})
-	return true
+	if _, ok := symbols[ch]; !ok {
+		return SKIP, nil, nil
+	}
+
+	ch, err = l.read()
+	if err != nil {
+		return ERROR, nil, err
+	}
+	return symbols[ch], []byte{ch}, nil
 }
 
-func (l *Lexer) scanKeyword() bool {
+func (l *Lexer) scanKeyword() (Token, []byte, error) {
 	// fail fast
-	peek := l.peek()
+	peek, err := l.peek()
+	if err != nil {
+		return ERROR, nil, err
+	}
+
 	if !isLetter(peek) {
-		return false
+		return SKIP, nil, nil
 	}
 
 	for _, keyword := range keywords {
 		n := len([]byte(keyword.String()))
 
-		peek := l.peekN(n)
+		peek, err := l.peekN(n)
+		if err != nil {
+			return ERROR, nil, err
+		}
 
 		// if these bytes explicitely don't match the keyword, then skip
 		if strings.ToUpper(string(peek)) != keyword.String() {
@@ -183,73 +236,87 @@ func (l *Lexer) scanKeyword() bool {
 			At this point we have a string of characters that appears to match a keyword.
 		*/
 
-		// functions must be followed by a LPAREN
-		if isFunctionTok(keyword) {
-			lparen := l.peekAfterSkipWS(n)
-			if lparen != '(' {
-				return false
-			}
-			l.push(keyword, l.readN(n))
-			return true
-		}
-
 		// examine the next byte after peek
-		ch := l.peekAfter(n)
+		ch, err := l.peekAfter(n)
+		if err != nil {
+			return ERROR, nil, err
+		}
 		switch {
 		// Only IDENTS and NUMERIC chars may followed by a dot
 		case ch == '.':
-			return false
+			return SKIP, nil, nil
 		case ch == eof, isWS(ch), isSymbol(ch), isQuote(ch):
-			l.push(keyword, l.readN(n))
-			return true
+			raw, err := l.readN(n)
+			if err != nil {
+				return ERROR, nil, err
+			}
+			return keyword, raw, nil
 		}
 	}
 
-	return false
+	return SKIP, nil, nil
 }
 
-func (l *Lexer) scanIdent() bool {
-	peek := l.peek()
+func (l *Lexer) scanIdent() (Token, []byte, error) {
+	peek, err := l.peek()
+	if err != nil {
+		return ERROR, nil, err
+	}
 	if peek == '`' {
 		return l.scanBacktickedIdent()
 	}
 
 	var raw []byte
 	for i := 0; ; i++ {
-		peek := l.peekAfter(i)
+		peek, err := l.peekAfter(i)
+		if err != nil {
+			return ERROR, nil, err
+		}
 		if isIdent(peek) {
 			raw = append(raw, peek)
 			continue
 		}
-		if len(raw) > 0 {
-			l.push(IDENT, l.readN(len(raw)))
-			return true
+		if i > 0 {
+			raw, err := l.readN(i)
+			if err != nil {
+				return ERROR, nil, err
+			}
+			return IDENT, raw, nil
 		}
-		return false
+		return SKIP, nil, nil
 	}
 }
 
-func (l *Lexer) scanBacktickedIdent() bool {
-	if l.peek() != '`' {
-		return false
+func (l *Lexer) scanBacktickedIdent() (Token, []byte, error) {
+	tick, err := l.peek()
+	if err != nil {
+		return ERROR, nil, err
+	}
+	if tick != '`' {
+		return SKIP, nil, nil
 	}
 
-	prev := byte('`')
+	prev := tick
 	for i := 1; ; i++ {
-		peek := l.peekAfter(i)
+		peek, err := l.peekAfter(i)
+		if err != nil {
+			return ERROR, nil, err
+		}
 
 		switch peek {
 		case eof:
-			if l.err == nil {
-				l.err = fmt.Errorf("Unterminated quote at position %d", l.pos)
+			if err != nil {
+				return ERROR, nil, fmt.Errorf("Non-terminated quote")
 			}
-			return false
-		case '`':
+			return SKIP, nil, nil
+		case tick:
 			// if this is an unescaped terminating quote, then done
 			if prev != '\\' {
-				raw := l.readN(i + 1)
-				l.push(IDENT, raw)
-				return true
+				raw, err := l.readN(i + 1)
+				if err != nil {
+					return ERROR, nil, err
+				}
+				return IDENT, raw, nil
 			}
 		}
 
@@ -259,72 +326,74 @@ func (l *Lexer) scanBacktickedIdent() bool {
 
 // read reads the next byte from the buffered reader.
 // Returns the byte(0) if an error occurs (or io.EOF is returned).
-func (l *Lexer) read() byte {
+func (l *Lexer) read() (byte, error) {
 	ch, err := l.r.ReadByte()
 	if err == io.EOF {
-		return eof
+		return eof, nil
 	}
 	if err != nil {
-		l.err = err
-		return eof
+		return eof, err
 	}
 	l.pos++
-	return ch
+	return ch, nil
 }
 
-func (l *Lexer) readN(n int) []byte {
+func (l *Lexer) readN(n int) ([]byte, error) {
 	var read []byte
 	for i := 0; i < n; i++ {
-		ch := l.read()
+		ch, err := l.read()
+		if err != nil {
+			return nil, err
+		}
 		if ch == eof {
 			break
 		}
 		read = append(read, ch)
 	}
-	return read
+	return read, nil
 }
 
-func (l *Lexer) peek() byte {
+func (l *Lexer) peek() (byte, error) {
 	peek, err := l.r.Peek(1)
-	if err != nil {
-		return eof
+	if err == io.EOF {
+		return eof, nil
 	}
-	return peek[0]
+	if err != nil {
+		return eof, err
+	}
+	return peek[0], nil
 }
 
 // Peeks up to n bytes. If EOF is read, then the returned string may be less than length n.
-func (l *Lexer) peekN(n int) []byte {
+func (l *Lexer) peekN(n int) ([]byte, error) {
 	peek, err := l.r.Peek(n)
-	if err != nil && err != io.EOF {
-		l.err = err
-		return nil
+	if err == io.EOF {
+		return nil, nil
 	}
-	return peek
+	if err != nil {
+		return nil, err
+	}
+	return peek, nil
 }
 
-func (l *Lexer) peekAfter(n int) byte {
-	peekPlusOne := l.peekN(n + 1)
+func (l *Lexer) peekAfter(n int) (byte, error) {
+	peekPlusOne, err := l.peekN(n + 1)
+	if err != nil {
+		return eof, nil
+	}
 	if len(peekPlusOne) != n+1 {
-		return eof
+		return eof, nil
 	}
-	return peekPlusOne[n]
-}
-
-func (l *Lexer) peekAfterSkipWS(n int) byte {
-	ch := l.peekAfter(n)
-	if isWS(ch) {
-		return l.peekAfterSkipWS(n + 1)
-	}
-	return ch
+	return peekPlusOne[n], nil
 }
 
 // unread places the previously read byte back on the reader.
-func (l *Lexer) unread() {
+func (l *Lexer) unread() error {
 	if err := l.r.UnreadByte(); err != nil {
-		l.err = fmt.Errorf("unread: %+v", err)
-		return
+		return err
 	}
 	l.pos--
+	return nil
 }
 
 func (l *Lexer) push(tok Token, raw []byte) {
