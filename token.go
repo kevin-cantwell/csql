@@ -5,8 +5,7 @@ type Token int
 
 const (
 	// Special tokens
-	ERROR Token = iota
-	SKIP
+	NONE Token = iota
 	EOF
 	WS
 
