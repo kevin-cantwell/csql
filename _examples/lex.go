@@ -1,11 +1,9 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
 	"log"
 	"os"
-	"strings"
 
 	"github.com/kevin-cantwell/csql"
 	"github.com/olekukonko/tablewriter"
@@ -17,21 +15,26 @@ func main() {
 	table := tablewriter.NewWriter(os.Stdout)
 	table.SetHeader([]string{"Token", "Raw"})
 
-	s := bufio.NewScanner(os.Stdin)
-	for s.Scan() {
-		lex := csql.NewLexer(strings.NewReader(s.Text()))
+	lex := csql.NewLexer(os.Stdin)
+
+	for {
 		for {
 			tok, raw, err := lex.Scan()
-			if tok == csql.EOF {
-				break
-			}
 			if err != nil {
 				panic(err)
 			}
+			if tok == csql.SEMICOLON {
+				table.Render() // Send output
+				table.ClearRows()
+				os.Exit(0)
+			}
+			if tok == csql.SEMICOLON {
+				table.Render() // Send output
+				table.ClearRows()
+				continue
+			}
 			table.Append([]string{tok.String(), fmt.Sprintf("%q", raw)})
 		}
-		table.Render() // Send output
-		table.ClearRows()
 	}
 
 }
