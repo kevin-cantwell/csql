@@ -19,21 +19,16 @@ func main() {
 
 	for {
 		for {
-			tok, raw, err := lex.Scan()
+			tok, err := lex.Scan()
 			if err != nil {
 				panic(err)
 			}
-			if tok == csql.SEMICOLON {
-				table.Render() // Send output
-				table.ClearRows()
-				os.Exit(0)
-			}
-			if tok == csql.SEMICOLON {
+			if tok.Type == csql.SEMICOLON {
 				table.Render() // Send output
 				table.ClearRows()
 				continue
 			}
-			table.Append([]string{tok.String(), fmt.Sprintf("%q", raw)})
+			table.Append([]string{tok.Type.String(), fmt.Sprintf("%q", tok.Raw)})
 		}
 	}
 

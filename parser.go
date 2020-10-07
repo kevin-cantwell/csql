@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+
+	"github.com/pkg/errors"
 )
 
 func line() string {
@@ -14,16 +16,11 @@ func line() string {
 	return fmt.Sprintf("%s:%d", file, l)
 }
 
-type token struct {
-	tok Token
-	raw []byte
-}
-
 type Parser struct {
 	lex       *Lexer
 	pos       int
-	scanned   []*token
-	unscanned []*token
+	scanned   []*Token
+	unscanned []*Token
 }
 
 func NewParser(r io.Reader) *Parser {
@@ -40,7 +37,7 @@ func (p *Parser) Parse() ([]Statement, error) {
 			return nil, err
 		}
 
-		switch t.tok {
+		switch t.Type {
 		case SEMICOLON:
 			continue
 		case EOF:
@@ -53,37 +50,37 @@ func (p *Parser) Parse() ([]Statement, error) {
 			}
 			stmt.Select = s
 		default:
-			return nil, fmt.Errorf("%s: unsupported statement at position %d: %q", line(), p.pos, t.raw)
+			return nil, errors.Errorf("unexpected token %q at line %d position %d", t, t.Line, t.Pos)
 		}
 
 		stmts = append(stmts, stmt)
 	}
 }
 
-func (p *Parser) scan() (*token, error) {
-	var t *token
+func (p *Parser) scan() (*Token, error) {
+	var t *Token
 	if len(p.unscanned) > 0 {
 		t = p.unscanned[len(p.unscanned)-1]
 		p.unscanned = p.unscanned[:len(p.unscanned)-1]
 	} else {
-		tok, raw, err := p.lex.Scan()
+		tok, err := p.lex.Scan()
 		if err != nil {
 			return nil, err
 		}
-		t = &token{tok: tok, raw: raw}
+		t = tok
 	}
 	p.scanned = append(p.scanned, t)
-	p.pos += len(t.raw)
+	p.pos += len(t.Raw)
 	return t, nil
 }
 
-func (p *Parser) scanSkipWS() (*token, error) {
+func (p *Parser) scanSkipWS() (*Token, error) {
 	for {
 		t, err := p.scan()
 		if err != nil {
 			return nil, err
 		}
-		if t.tok != WS {
+		if t.Type != WS {
 			return t, nil
 		}
 	}
@@ -96,7 +93,7 @@ func (p *Parser) unscan() {
 	t := p.scanned[len(p.scanned)-1]
 	p.scanned = p.scanned[:len(p.scanned)-1]
 	p.unscanned = append(p.unscanned, t)
-	p.pos -= len(t.raw)
+	p.pos -= len(t.Raw)
 }
 
 func (p *Parser) unscanSkipWS() {
@@ -105,7 +102,7 @@ func (p *Parser) unscanSkipWS() {
 		if len(p.scanned) == 0 {
 			return
 		}
-		if p.scanned[len(p.scanned)-1].tok != WS {
+		if p.scanned[len(p.scanned)-1].Type != WS {
 			return
 		}
 	}
@@ -119,8 +116,9 @@ func (p *Parser) parseSelect() (*SelectStatement, error) {
 		return nil, err
 	}
 
-	if t.tok != SELECT {
-		return nil, fmt.Errorf("expected SELECT at position %d: %q", p.pos, t.raw)
+	// SELECT
+	if t.Type != SELECT {
+		return nil, errors.Errorf("unexpected token %q at line %d position %d", t, t.Line, t.Pos)
 	}
 
 	t, err = p.scanSkipWS()
@@ -128,17 +126,26 @@ func (p *Parser) parseSelect() (*SelectStatement, error) {
 		return nil, err
 	}
 
-	if t.tok == DISTINCT {
+	// DISTINCT
+	if t.Type == DISTINCT {
 		stmt.Distinct = true
 	} else {
 		p.unscan()
 	}
 
+	// column, column, ...
 	cols, err := p.parseSelectColumns()
 	if err != nil {
 		return nil, err
 	}
-	stmt.Columns = cols
+	stmt.Cols = cols
+
+	// FROM table [, table...]
+	from, err := p.parseFrom()
+	if err != nil {
+		return nil, err
+	}
+	stmt.From = *from
 
 	// TODO: FROM, WHERE, GROUP BY, LIMIT, WHEN
 	// from, err := p.parseFrom()
@@ -152,11 +159,11 @@ func (p *Parser) parseSelect() (*SelectStatement, error) {
 		if err != nil {
 			return nil, err
 		}
-		switch t.tok {
+		switch t.Type {
 		case EOF, SEMICOLON:
 			return stmt, nil
 		default:
-			return nil, fmt.Errorf("unexpected token at position %d: %q", p.pos, t.raw)
+			return nil, errors.Errorf("unexpected token %q at line %d position %d", t, t.Line, t.Pos)
 		}
 	}
 }
@@ -176,7 +183,7 @@ func (p *Parser) parseSelectColumns() ([]SelectColumn, error) {
 			return nil, err
 		}
 
-		if t.tok != COMMA {
+		if t.Type != COMMA {
 			p.unscan()
 			return cols, nil
 		}
@@ -191,7 +198,7 @@ func (p *Parser) parseSelectColumn() (*SelectColumn, error) {
 
 	// * | expression
 	var col *SelectColumn
-	switch t.tok {
+	switch t.Type {
 	case ASTERISK:
 		return &SelectColumn{
 			Star: true,
@@ -203,8 +210,7 @@ func (p *Parser) parseSelectColumn() (*SelectColumn, error) {
 			return nil, err
 		}
 	default:
-		p.unscan()
-		return nil, fmt.Errorf("unexpected token at position %d: %q", p.pos, t.raw)
+		return nil, errors.Errorf("unexpected token %q at line %d position %d", t, t.Line, t.Pos)
 	}
 
 	// AS
@@ -212,7 +218,7 @@ func (p *Parser) parseSelectColumn() (*SelectColumn, error) {
 	if err != nil {
 		return nil, err
 	}
-	if t.tok != AS {
+	if t.Type != AS {
 		p.unscan()
 		return col, nil
 	}
@@ -222,11 +228,10 @@ func (p *Parser) parseSelectColumn() (*SelectColumn, error) {
 	if err != nil {
 		return nil, err
 	}
-	if t.tok != STRING && t.tok != IDENT {
-		p.unscan()
-		return nil, fmt.Errorf("unexpected token at position %d: %q", p.pos, t.raw)
+	if t.Type != STRING && t.Type != IDENT {
+		return nil, errors.Errorf("unexpected token %q at line %d position %d", t, t.Line, t.Pos)
 	}
-	col.Alias = unquote(string(t.raw))
+	col.As = unquote(string(t.Raw))
 
 	return col, nil
 }
@@ -238,8 +243,8 @@ func (p *Parser) parseSelectStarColumn() (*SelectColumn, error) {
 
 	}
 
-	if t.tok != ASTERISK {
-		return nil, fmt.Errorf("missing \"*\" at position %d: %q", p.pos, t.raw)
+	if t.Type != ASTERISK {
+		return nil, errors.Errorf("unexpected token %q at line %d position %d", t, t.Line, t.Pos)
 	}
 
 	t, err = p.scanSkipWS()
@@ -248,8 +253,8 @@ func (p *Parser) parseSelectStarColumn() (*SelectColumn, error) {
 	}
 	p.unscan()
 
-	if t.tok != COMMA && t.tok != FROM {
-		return nil, fmt.Errorf("expected \",\" or \"FROM\" at position %d: %q", p.pos, t.raw)
+	if t.Type != COMMA && t.Type != FROM {
+		return nil, errors.Errorf("unexpected token %q at line %d position %d", t, t.Line, t.Pos)
 	}
 
 	return &SelectColumn{
@@ -258,13 +263,20 @@ func (p *Parser) parseSelectStarColumn() (*SelectColumn, error) {
 }
 
 func (p *Parser) parseSelectExpressionColumn() (*SelectColumn, error) {
-	infix, err := p.scanInfixTerms()
+	expr, err := p.parseExpression()
 	if err != nil {
 		return nil, err
 	}
 
-	for _, t := range infix {
-		debugf("%q\n", t)
+	return &SelectColumn{
+		Expr: expr,
+	}, nil
+}
+
+func (p *Parser) parseExpression() (Expression, error) {
+	infix, err := p.scanInfixTerms()
+	if err != nil {
+		return nil, err
 	}
 
 	sh := &shuntingYard{}
@@ -278,59 +290,38 @@ func (p *Parser) parseSelectExpressionColumn() (*SelectColumn, error) {
 		return nil, err
 	}
 
-	return &SelectColumn{
-		Expr: expr,
-	}, nil
-}
+	// op, err := p.scanComparisonOp()
+	// if err != nil {
+	// 	return nil, err
+	// }
+	// if op == nil {
+	// 	return expr, nil
+	// }
 
-// exprTerm represents an expression exprTerm: a operand, operator, function, or parenthesis
-type exprTerm []*token
+	// rhs, err := p.parseExpression()
+	// if err != nil {
+	// 	return nil, err
+	// }
 
-func (t exprTerm) isOperand() bool {
-	return tokenIn(t.tok(), NUMERIC, STRING, IDENT)
-}
+	// expr = &ComparisonExpression{
+	// 	// Op: ,
+	// 	Left:  expr,
+	// 	Right: rhs,
+	// }
 
-func (t exprTerm) isOperator() bool {
-	return tokenIn(t.tok(), PLUS, MINUS, ASTERISK, SLASH, PERCENT)
-}
-
-func (t exprTerm) isFunction() bool {
-	return tokenIn(t.tok(), COUNT, SUM, AVG, MIN, MAX)
-}
-
-func (t exprTerm) isLeftParen() bool {
-	return tokenIn(t.tok(), LPAREN)
-}
-
-func (t exprTerm) isRightParen() bool {
-	return tokenIn(t.tok(), RPAREN)
-}
-
-func (t exprTerm) tok() Token {
-	if len(t) == 0 {
-		return NONE
-	}
-	return t[0].tok
-}
-
-func (t exprTerm) String() string {
-	var s string
-	for _, token := range t {
-		s += string(token.raw)
-	}
-	return s
+	return expr, nil
 }
 
 func (p *Parser) scanInfixTerms() ([]exprTerm, error) {
 
 	// operands and operators
 	var expr []exprTerm
-	var prev Token = NONE
+	var prev TokenType = ILLEGAL
 
 	for {
 		// last Token in the last exprTerm
 		if len(expr) > 0 {
-			prev = expr[len(expr)-1].tok()
+			prev = expr[len(expr)-1].typ()
 		}
 
 		t, err := p.scanSkipWS()
@@ -340,32 +331,28 @@ func (p *Parser) scanInfixTerms() ([]exprTerm, error) {
 
 		term := exprTerm{t}
 
-		switch t.tok {
+		switch t.Type {
 		case PLUS, MINUS:
-			if !tokenIn(prev, NONE, PLUS, MINUS, NUMERIC, STRING, IDENT, LPAREN, RPAREN) {
-				p.unscan()
-				return nil, fmt.Errorf("bad syntax at position %d: %q", p.pos, t.raw)
+			if !tokenIn(prev, ILLEGAL, PLUS, MINUS, NUMERIC, STRING, IDENT, LPAREN, RPAREN) {
+				return nil, errors.Errorf("unexpected token %q at line %d position %d", t, t.Line, t.Pos)
 			}
 		case ASTERISK, SLASH:
 			if !tokenIn(prev, NUMERIC, STRING, IDENT, RPAREN) {
-				p.unscan()
-				return nil, fmt.Errorf("bad syntax at position %d: %q", p.pos, t.raw)
+				return nil, errors.Errorf("unexpected token %q at line %d position %d", t, t.Line, t.Pos)
 			}
 		case NUMERIC, STRING, COUNT, SUM, MIN, MAX, AVG:
-			if !tokenIn(prev, NONE, PLUS, MINUS, ASTERISK, SLASH, LPAREN) {
-				p.unscan()
-				return nil, fmt.Errorf("bad syntax at position %d: %q", p.pos, t.raw)
+			if !tokenIn(prev, ILLEGAL, PLUS, MINUS, ASTERISK, SLASH, LPAREN) {
+				return nil, errors.Errorf("unexpected token %q at line %d position %d", t, t.Line, t.Pos)
 			}
 		case IDENT:
-			if !tokenIn(prev, NONE, PLUS, MINUS, ASTERISK, SLASH, LPAREN) {
-				p.unscan()
-				return nil, fmt.Errorf("bad syntax at position %d: %q", p.pos, t.raw)
+			if !tokenIn(prev, ILLEGAL, PLUS, MINUS, ASTERISK, SLASH, LPAREN) {
+				return nil, errors.Errorf("unexpected token %q at line %d position %d", t, t.Line, t.Pos)
 			}
 			dot, err := p.scan()
 			if err != nil {
 				return nil, err
 			}
-			if dot.tok != DOT {
+			if dot.Type != DOT {
 				p.unscan()
 				break
 			}
@@ -373,15 +360,13 @@ func (p *Parser) scanInfixTerms() ([]exprTerm, error) {
 			if err != nil {
 				return nil, err
 			}
-			if ident.tok != IDENT {
-				p.unscan()
-				return nil, fmt.Errorf("unexpected token at position %d: %q", p.pos, ident.raw)
+			if ident.Type != IDENT {
+				return nil, errors.Errorf("unexpected token %q at line %d position %d", t, t.Line, t.Pos)
 			}
 			term = append(term, dot, ident)
 		case LPAREN:
-			if !tokenIn(prev, NONE, PLUS, MINUS, ASTERISK, SLASH, COUNT, SUM, AVG, MIN, MAX, LPAREN) {
-				p.unscan()
-				return nil, fmt.Errorf("unexpected token at position %d: %q", p.pos, t.raw)
+			if !tokenIn(prev, ILLEGAL, PLUS, MINUS, ASTERISK, SLASH, COUNT, SUM, AVG, MIN, MAX, LPAREN) {
+				return nil, errors.Errorf("unexpected token %q at line %d position %d", t, t.Line, t.Pos)
 			}
 
 			expr = append(expr, term)
@@ -397,9 +382,8 @@ func (p *Parser) scanInfixTerms() ([]exprTerm, error) {
 			if err != nil {
 				return nil, err
 			}
-			if rparen.tok != RPAREN {
-				p.unscan()
-				return nil, fmt.Errorf("unexpected token at position %d: %q", p.pos, rparen.raw)
+			if rparen.Type != RPAREN {
+				return nil, errors.Errorf("unexpected token %q at line %d position %d", t, t.Line, t.Pos)
 			}
 
 			term = exprTerm{rparen}
@@ -412,198 +396,176 @@ func (p *Parser) scanInfixTerms() ([]exprTerm, error) {
 	}
 }
 
-func tokenIn(tok Token, in ...Token) bool {
+func (p *Parser) scanComparisonOp() (exprTerm, error) {
+	panic("todo")
+}
+
+func (p *Parser) parseFrom() (*FromClause, error) {
+	var from FromClause
+
+	t, err := p.scanSkipWS()
+	if err != nil {
+		return nil, err
+	}
+	if t.Type != FROM {
+		return nil, errors.Errorf("unexpected token %q at line %d position %d", t, t.Line, t.Pos)
+	}
+
+	tables, err := p.parseTablesExpression()
+	if err != nil {
+		return nil, err
+	}
+	from.Tables = *tables
+
+	return &from, nil
+}
+
+func (p *Parser) parseTablesExpression() (*TablesExpression, error) {
+	tables := &TablesExpression{}
+
+	// IDENT | LPAREN
+	t, err := p.scanSkipWS()
+	if err != nil {
+		return nil, err
+	}
+	switch t.Type {
+	case LPAREN:
+		inner, err := p.parseTablesExpression()
+		if err != nil {
+			return nil, err
+		}
+		t, err = p.scanSkipWS()
+		if err != nil {
+			return nil, err
+		}
+		if t.Type != RPAREN {
+			return nil, errors.Errorf("unexpected token %q at line %d position %d", t, t.Line, t.Pos)
+		}
+		tables.Expr = inner
+	case IDENT:
+		table := unquote(string(t.Raw))
+		tables.Table = &table
+	default:
+		return nil, errors.Errorf("unexpected token %q at line %d position %d", t, t.Line, t.Pos)
+	}
+
+	// AS
+	t, err = p.scanSkipWS()
+	if err != nil {
+		return nil, err
+	}
+	switch t.Type {
+	case AS:
+		alias, err := p.scanSkipWS()
+		if err != nil {
+			return nil, err
+		}
+		if alias.Type != IDENT && alias.Type != STRING {
+			return nil, errors.Errorf("unexpected token %q at line %d position %d", t, t.Line, t.Pos)
+		}
+		tables.As = unquote(string(alias.Raw))
+	case IDENT, STRING:
+		tables.As = unquote(string(t.Raw))
+	default:
+		p.unscan()
+	}
+
+	// JOIN expression
+	t, err = p.scanSkipWS()
+	if err != nil {
+		return nil, err
+	}
+
+	switch t.Type {
+	case LPAREN:
+		p.unscan()
+		return p.parseTablesExpression()
+	case COMMA:
+		join, err := p.parseTablesExpression()
+		if err != nil {
+			return nil, err
+		}
+		tables.CrossJoin = join
+	case CROSS_JOIN:
+		join, err := p.parseTablesExpression()
+		if err != nil {
+			return nil, err
+		}
+		tables.CrossJoin = join
+	default:
+		p.unscan()
+	}
+	// TODO: Other join cases
+
+	// AS
+	t, err = p.scanSkipWS()
+	if err != nil {
+		return nil, err
+	}
+	switch t.Type {
+	case AS:
+		alias, err := p.scanSkipWS()
+		if err != nil {
+			return nil, err
+		}
+		if alias.Type != IDENT && alias.Type != STRING {
+			return nil, errors.Errorf("unexpected token %q at line %d position %d", t, t.Line, t.Pos)
+		}
+		tables.As = unquote(string(alias.Raw))
+	case IDENT, STRING:
+		tables.As = unquote(string(t.Raw))
+	default:
+		p.unscan()
+	}
+
+	// ON
+	t, err = p.scanSkipWS()
+	if err != nil {
+		return nil, err
+	}
+	switch t.Type {
+	case ON:
+		on, err := p.parseJoinOnPredicate()
+		if err != nil {
+			return nil, err
+		}
+		// tables.On
+		panic(on)
+	default:
+		p.unscan()
+	}
+
+	return tables, nil
+}
+
+func (p *Parser) parseJoinOnPredicate() (*JoinOnPredicate, error) {
+	left, err := p.parseExpression()
+	if err != nil {
+		return nil, err
+	}
+
+	panic(left)
+}
+
+func (p *Parser) scanSkipWSAssertNext(expected TokenType, varargs ...TokenType) error {
+	for _, expectedType := range append([]TokenType{expected}, varargs...) {
+		t, err := p.scanSkipWS()
+		if err != nil {
+			return err
+		}
+		if t.Type != expectedType {
+			return errors.Errorf("unexpected token %q at line %d position %d", t, t.Line, t.Pos)
+		}
+	}
+	return nil
+
+}
+
+func tokenIn(tok TokenType, in ...TokenType) bool {
 	for _, t := range in {
 		if tok == t {
 			return true
 		}
-	}
-	return false
-}
-
-// shuntingYard processes an infix expression and
-type shuntingYard struct {
-	output []exprTerm
-	stack  []exprTerm
-}
-
-func (s *shuntingYard) PushInfix(infix []exprTerm) error {
-	// while there are term to be read:
-	//     read a term.
-	for _, term := range infix {
-		switch {
-		// if the term is a operand, then:
-		//     push it to the output queue.
-		case term.isOperand():
-
-			s.pushOutput(term)
-		// else if the term is a function then:
-		//     push it onto the operator stack
-		case term.isFunction():
-			s.pushStack(term)
-		// else if the term is an operator then:
-		//     while ((there is an operator at the top of the operator stack)
-		//             and ((the operator at the top of the operator stack has greater precedence)
-		// 	               or (the operator at the top of the operator stack has equal precedence and the term is left associative))
-		//             and (the operator at the top of the operator stack is not a left parenthesis)):
-		//         pop operators from the operator stack onto the output queue.
-		//     push it onto the operator stack.
-		case term.isOperator():
-			for peek := s.peekStack(); peek != nil && !peek.isLeftParen() && s.opPrecedes(peek, term); peek = s.peekStack() {
-				s.pushOutput(s.popStack())
-			}
-			// for top := s.popStack(); top != nil && !top.isLeftParen() && s.opPrecedes(top, term); top = s.popStack() {
-			// 	s.pushOutput(top)
-			// }
-			s.pushStack(term)
-		// else if the term is a left parenthesis (i.e. "("), then:
-		//     push it onto the operator stack.
-		case term.isLeftParen():
-			s.pushStack(term)
-		// else if the term is a right parenthesis (i.e. ")"), then:
-		//     while the operator at the top of the operator stack is not a left parenthesis:
-		//         pop the operator from the operator stack onto the output queue.
-		//	   /* If the stack runs out without finding a left parenthesis, then there are mismatched parentheses. */
-		//     if there is a left parenthesis at the top of the operator stack, then:
-		//         pop the operator from the operator stack and discard it
-		case term.isRightParen():
-			// debugf("output:\n")
-			// for _, t := range s.output {
-			// 	debugf("\toutput:%v\n", t)
-			// }
-			// debugf("stack:\n")
-			// for _, t := range s.stack {
-			// 	debugf("\tstack:%v\n", t)
-			// }
-			top := s.popStack()
-			for ; top != nil && !top.isLeftParen(); top = s.popStack() {
-				s.pushOutput(top)
-			}
-			if top == nil {
-				return fmt.Errorf("missing left paren")
-			}
-			if !top.isLeftParen() {
-				s.pushStack(top)
-			}
-		}
-	}
-	// if there are no more tokens to read then:
-	//     while there are still operator tokens on the stack:
-	//         /* If the operator token on the top of the stack is a parenthesis, then there are mismatched parentheses. */
-	//         pop the operator from the operator stack onto the output queue.
-	for pop := s.popStack(); pop != nil; pop = s.popStack() {
-		if pop.isLeftParen() || pop.isRightParen() {
-			return fmt.Errorf("extra parenthesis %q", pop[0].raw)
-		}
-		s.pushOutput(pop)
-	}
-
-	return nil
-}
-
-func (s *shuntingYard) ParseExpression() (Expression, error) {
-	var stack []Expression
-
-	for _, term := range s.output {
-		var expr Expression
-		switch t := term.tok(); t {
-		case STRING:
-			token := term[0]
-			str := unquote(string(token.raw))
-			expr = &OperandExpression{
-				String: &str,
-			}
-		case NUMERIC:
-			token := term[0]
-			f, err := strconv.ParseFloat(string(token.raw), 64)
-			if err != nil {
-				return nil, err
-			}
-			expr = &OperandExpression{
-				Numeric: &f,
-			}
-		case IDENT:
-			var ident Ident
-			if len(term) == 3 {
-				ident.Table = unquote(string(term[0].raw))
-				ident.Field = unquote(string(term[2].raw))
-			} else {
-				ident.Field = unquote(string(term[0].raw))
-			}
-			expr = &OperandExpression{
-				Ident: &ident,
-			}
-		case PLUS, MINUS, ASTERISK, SLASH, PERCENT:
-			right := stack[len(stack)-1]
-			left := stack[len(stack)-2]
-			stack = stack[:len(stack)-2]
-			expr = &OperatorExpression{
-				Op:    t,
-				Left:  left,
-				Right: right,
-			}
-		case COUNT, SUM, MIN, MAX, AVG:
-			arg := stack[len(stack)-1]
-			stack = stack[:len(stack)-1]
-			expr = &FunctionExpression{
-				Func: t,
-				Args: []Expression{arg},
-			}
-		default:
-			return nil, fmt.Errorf("invalid expression syntax")
-		}
-
-		stack = append(stack, expr)
-	}
-
-	if len(stack) != 1 {
-		for _, expr := range stack {
-			fmt.Printf("%+v\n", expr)
-		}
-		panic("reverse polish notation mismatch")
-	}
-
-	return stack[0], nil
-}
-
-func (s *shuntingYard) pushOutput(term exprTerm) {
-	debugf("push output: %+v\n", term)
-	s.output = append(s.output, term)
-}
-
-func (s *shuntingYard) pushStack(term exprTerm) {
-	debugf("push stack: %+v\n", term)
-	s.stack = append(s.stack, term)
-}
-
-func (s *shuntingYard) popStack() exprTerm {
-	if len(s.stack) == 0 {
-		return nil
-	}
-	pop := s.stack[len(s.stack)-1]
-	s.stack = s.stack[:len(s.stack)-1]
-	debugf("pop stack: %+v\n", pop)
-	return pop
-}
-
-func (s *shuntingYard) peekStack() exprTerm {
-	if len(s.stack) == 0 {
-		return nil
-	}
-	return s.stack[len(s.stack)-1]
-}
-
-func (s *shuntingYard) opPrecedes(a, b exprTerm) bool {
-	if !a.isOperator() || !b.isOperator() {
-		panic("non-operator precedence check")
-	}
-	atok := a[len(a)-1].tok
-	btok := b[len(b)-1].tok
-	if tokenIn(atok, PLUS, MINUS) {
-		return false
-	}
-	if tokenIn(btok, PLUS, MINUS) {
-		return true
 	}
 	return false
 }

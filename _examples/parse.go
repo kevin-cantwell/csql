@@ -3,10 +3,10 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"os"
-	"strings"
 
 	"github.com/kevin-cantwell/csql"
 )
@@ -16,19 +16,18 @@ func main() {
 
 	enc := json.NewEncoder(os.Stdout)
 
-	s := bufio.NewScanner(os.Stdin)
-	for s.Scan() {
-		p := csql.NewParser(strings.NewReader(s.Text()))
-		stmts, err := p.Parse()
-		if err != nil {
+	p := csql.NewParser(repl())
+	stmts, err := p.Parse()
+	if err != nil {
+		fmt.Printf("%+v\n", err)
+		panic(err)
+	}
+	for _, stmt := range stmts {
+		if err := enc.Encode(stmt); err != nil {
 			panic(err)
 		}
-		for _, stmt := range stmts {
-			if err := enc.Encode(stmt); err != nil {
-				panic(err)
-			}
-		}
 	}
+
 }
 
 func repl() io.Reader {
@@ -40,8 +39,16 @@ func repl() io.Reader {
 			b, err := in.ReadByte()
 			if err != nil {
 				pw.CloseWithError(err)
+				return
 			}
-			_ = b
+			_, err = pw.Write([]byte{b})
+			if err != nil {
+				panic(err)
+			}
+			if b == ';' {
+				pw.Close()
+				return
+			}
 		}
 	}()
 	return pr
