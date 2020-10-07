@@ -123,7 +123,7 @@ func (s *shuntingYard) ParseExpression() (Expression, error) {
 		switch t := term.typ(); t {
 		case STRING:
 			token := term[0]
-			str := unquote(string(token.Raw))
+			str := unquote(token.Raw)
 			expr = &OperandExpression{
 				String: &str,
 			}
@@ -139,10 +139,10 @@ func (s *shuntingYard) ParseExpression() (Expression, error) {
 		case IDENT:
 			var field Field
 			if len(term) == 3 {
-				field.Table = unquote(string(term[0].Raw))
-				field.Name = unquote(string(term[2].Raw))
+				field.Table = unquote(term[0].Raw)
+				field.Name = unquote(term[2].Raw)
 			} else {
-				field.Name = unquote(string(term[0].Raw))
+				field.Name = unquote(term[0].Raw)
 			}
 			expr = &OperandExpression{
 				Field: &field,

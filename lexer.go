@@ -121,44 +121,16 @@ func (l *Lexer) scanWS() (*Token, error) {
 
 // scans a quoted string literal
 func (l *Lexer) scanString() (*Token, error) {
-	peek, err := l.peek()
+	quote, err := l.peek()
 	if err != nil {
 		return nil, err
 	}
 
-	if peek != '\'' {
+	switch quote {
+	case '\'':
+		return l.scanQuote()
+	default:
 		return nil, nil
-	}
-
-	quote := peek
-	prev := peek
-	for i := 1; ; i++ {
-		peek, err := l.peekAfter(i)
-		if err != nil {
-			return nil, err
-		}
-
-		switch peek {
-		case eof:
-			return nil, fmt.Errorf("mismatched quote")
-		case quote:
-			// TODO: Correctly identify single quote escape sequences (ie: \\\' should not match)
-			// if this is an unescaped terminating quote, then done
-			if prev != '\\' {
-				raw, err := l.readN(i + 1)
-				if err != nil {
-					return nil, err
-				}
-				return &Token{
-					Type: STRING,
-					Raw:  raw,
-					Line: l.line,
-					Pos:  l.pos - len(raw),
-				}, nil
-			}
-		}
-
-		prev = peek
 	}
 }
 
@@ -275,7 +247,7 @@ func (l *Lexer) scanIdent() (*Token, error) {
 		return nil, err
 	}
 	if peek == '"' {
-		return l.scanQuotedIdent()
+		return l.scanQuote()
 	}
 
 	var raw []byte
@@ -307,45 +279,52 @@ func (l *Lexer) scanIdent() (*Token, error) {
 	}
 }
 
-func (l *Lexer) scanQuotedIdent() (*Token, error) {
-	quote, err := l.peek()
+func (l *Lexer) scanQuote() (*Token, error) {
+	quote, err := l.read()
 	if err != nil {
 		return nil, err
 	}
-	if quote != '"' {
-		return nil, nil
-	}
 
-	prev := quote
-	for i := 1; ; i++ {
-		peek, err := l.peekAfter(i)
+	raw := []byte{quote}
+
+	for {
+		ch, err := l.read()
 		if err != nil {
 			return nil, err
 		}
 
-		switch peek {
+		switch ch {
 		case eof:
+			return nil, fmt.Errorf("mismatched quote")
+		case '\\':
+			escaped, err := l.read()
 			if err != nil {
-				return nil, fmt.Errorf("mismatched quote")
+				return nil, err
 			}
-			return nil, nil
+			raw = append(raw, '\\', escaped)
+			if escaped == quote {
+				continue
+			}
+			n, ok := escapeChars[escaped]
+			if !ok {
+				return nil, fmt.Errorf("unkown escape sequence: '\\%s'", string(escaped))
+			}
+			seq, err := l.readN(n)
+			if err != nil {
+				return nil, err
+			}
+			raw = append(raw, seq...)
 		case quote:
-			// if this is an unescaped terminating quote, then done
-			if prev != '\\' {
-				raw, err := l.readN(i + 1)
-				if err != nil {
-					return nil, err
-				}
-				return &Token{
-					Type: IDENT,
-					Raw:  raw,
-					Line: l.line,
-					Pos:  l.pos - len(raw),
-				}, nil
-			}
+			raw = append(raw, quote)
+			return &Token{
+				Type: STRING,
+				Raw:  raw,
+				Line: l.line,
+				Pos:  l.pos - len(raw),
+			}, nil
+		default:
+			raw = append(raw, ch)
 		}
-
-		prev = peek
 	}
 }
 
@@ -555,3 +534,19 @@ var (
 		FALSE,
 	}
 )
+
+// map of escape characters to number of bytes in the escape sequence
+var escapeChars = map[byte]int{
+	'x':  2, // followed by exactly two hexadecimal digits
+	'u':  4, // followed by exactly four hexadecimal digits
+	'U':  8, // followed by exactly eight hexadecimal digits
+	'a':  0, // Alert or bell
+	'b':  0, // Backspace
+	'\\': 0, // Backslash
+	't':  0, // Horizontal tab
+	'n':  0, // Line feed or newline
+	'f':  0, // Form feed
+	'r':  0, // Carriage return
+	'v':  0, // Veritical tab
+	// \' and \" must be handled specially within the context of single or double quoted strings
+}

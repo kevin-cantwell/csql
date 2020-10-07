@@ -203,14 +203,12 @@ func (p *Parser) parseSelectColumn() (*SelectColumn, error) {
 		return &SelectColumn{
 			Star: true,
 		}, nil
-	case IDENT, STRING, NUMERIC, PLUS, MINUS, COUNT, SUM, MIN, MAX, AVG:
+	default:
 		p.unscan()
 		col, err = p.parseSelectExpressionColumn()
 		if err != nil {
 			return nil, err
 		}
-	default:
-		return nil, errors.Errorf("unexpected token %q at line %d position %d", t, t.Line, t.Pos)
 	}
 
 	// AS
@@ -223,15 +221,15 @@ func (p *Parser) parseSelectColumn() (*SelectColumn, error) {
 		return col, nil
 	}
 
-	// STRING | IDENT
+	// IDENT
 	t, err = p.scanSkipWS()
 	if err != nil {
 		return nil, err
 	}
-	if t.Type != STRING && t.Type != IDENT {
+	if t.Type != IDENT {
 		return nil, errors.Errorf("unexpected token %q at line %d position %d", t, t.Line, t.Pos)
 	}
-	col.As = unquote(string(t.Raw))
+	col.As = unquote(t.Raw)
 
 	return col, nil
 }
@@ -310,6 +308,31 @@ func (p *Parser) parseExpression() (Expression, error) {
 	// }
 
 	return expr, nil
+}
+
+type dataType int
+
+const (
+	unknownDataType dataType = iota
+	stringDataType
+	numericDataType
+	booleanDataType
+)
+
+func (p *Parser) scanInfixExpression() ([]*Token, error) {
+	var (
+	// isString    bool
+	// isNumeric   bool
+	// isPredicate bool
+	)
+	t, err := p.scanSkipWS()
+	if err != nil {
+		return nil, err
+	}
+	switch t.Type {
+	case NUMERIC:
+	}
+	panic("todo")
 }
 
 func (p *Parser) scanInfixTerms() ([]exprTerm, error) {
@@ -396,7 +419,14 @@ func (p *Parser) scanInfixTerms() ([]exprTerm, error) {
 	}
 }
 
-func (p *Parser) scanComparisonOp() (exprTerm, error) {
+func (p *Parser) scanComparisonOp() (*Token, error) {
+	t, err := p.scanSkipWS()
+	if err != nil {
+		return nil, err
+	}
+	switch t.Type {
+	// case
+	}
 	panic("todo")
 }
 
@@ -443,7 +473,7 @@ func (p *Parser) parseTablesExpression() (*TablesExpression, error) {
 		}
 		tables.Expr = inner
 	case IDENT:
-		table := unquote(string(t.Raw))
+		table := unquote(t.Raw)
 		tables.Table = &table
 	default:
 		return nil, errors.Errorf("unexpected token %q at line %d position %d", t, t.Line, t.Pos)
@@ -463,9 +493,9 @@ func (p *Parser) parseTablesExpression() (*TablesExpression, error) {
 		if alias.Type != IDENT && alias.Type != STRING {
 			return nil, errors.Errorf("unexpected token %q at line %d position %d", t, t.Line, t.Pos)
 		}
-		tables.As = unquote(string(alias.Raw))
+		tables.As = unquote(alias.Raw)
 	case IDENT, STRING:
-		tables.As = unquote(string(t.Raw))
+		tables.As = unquote(t.Raw)
 	default:
 		p.unscan()
 	}
@@ -511,9 +541,9 @@ func (p *Parser) parseTablesExpression() (*TablesExpression, error) {
 		if alias.Type != IDENT && alias.Type != STRING {
 			return nil, errors.Errorf("unexpected token %q at line %d position %d", t, t.Line, t.Pos)
 		}
-		tables.As = unquote(string(alias.Raw))
+		tables.As = unquote(alias.Raw)
 	case IDENT, STRING:
-		tables.As = unquote(string(t.Raw))
+		tables.As = unquote(t.Raw)
 	default:
 		p.unscan()
 	}
@@ -570,44 +600,41 @@ func tokenIn(tok TokenType, in ...TokenType) bool {
 	return false
 }
 
-func unquote(orig string) string {
+func unquote(orig []byte) string {
 	if len(orig) == 0 {
-		return orig
+		return ""
 	}
 
-	quoteChar := orig[0]
-	switch quoteChar {
-	case '`':
-		return string(orig[1 : len(orig)-1])
+	quote := orig[0]
+	switch quote {
 	case '"':
-		u, err := strconv.Unquote(orig)
+		uq, err := strconv.Unquote(string(orig))
 		if err != nil {
-			return orig
+			panic(errors.Errorf("%q: %+v", orig, err))
 		}
-		return u
+		return uq
 	case '\'':
-		panic("TODO")
+		// convert single quotes to double quotes and try again
+		dq := []byte{'"'}
+		for i := 1; i < len(orig); i++ {
+			ch := orig[i]
+			switch ch {
+			case '\\':
+				escape := orig[i+1]
+				if '\'' == escape {
+					dq = append(dq, '\'')
+					i++
+					continue
+				}
+				dq = append(dq, ch)
+			case '\'':
+				dq = append(dq, '"')
+			default:
+				dq = append(dq, ch)
+			}
+		}
+		return unquote(dq)
 	default:
-		return orig
+		return string(orig)
 	}
 }
-
-var escapeChars = []byte{
-	'\\', '\'', '\t', '\n', '\a', '\b', '\f',
-}
-
-// \x followed by exactly two hexadecimal digits,
-// \ followed by exactly three octal digits,
-// \u followed by exactly four hexadecimal digits,
-// \U followed by exactly eight hexadecimal digits,
-
-// \a	Alert or bell
-// \b	Backspace
-// \\	Backslash
-// \t	Horizontal tab
-// \n	Line feed or newline
-// \f	Form feed
-// \r	Carriage return
-// \v	Vertical tab
-// \'	Single quote (only in rune literals)
-// \"	Double quote (only in string literals)
