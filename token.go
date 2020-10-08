@@ -1,6 +1,8 @@
 package csql
 
-import "fmt"
+import (
+	"fmt"
+)
 
 type Token struct {
 	// TokenType categorizes the token.
@@ -18,6 +20,16 @@ func (t *Token) String() string {
 		return "EOF"
 	}
 	return string(t.Raw)
+}
+
+func (t *Token) MarshalJSON() ([]byte, error) {
+	return []byte(
+		`{"type":` + fmt.Sprintf("%q", t.Type) +
+			`,"raw":` + fmt.Sprintf("%q", t.Raw) +
+			`,"line":` + fmt.Sprint(t.Line) +
+			`,"pos":` + fmt.Sprint(t.Pos) +
+			`}`,
+	), nil
 }
 
 // Token represents a lexical token.

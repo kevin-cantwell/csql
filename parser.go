@@ -281,7 +281,7 @@ func (p *Parser) parseSelectStarColumn() (*SelectColumn, error) {
 }
 
 func (p *Parser) parseSelectExpressionColumn() (*SelectColumn, error) {
-	expr, err := p.parseExpression()
+	expr, err := (&ExpressionParser{}).Parse(p)
 	if err != nil {
 		return nil, err
 	}
@@ -289,51 +289,6 @@ func (p *Parser) parseSelectExpressionColumn() (*SelectColumn, error) {
 	return &SelectColumn{
 		Expr: expr,
 	}, nil
-}
-
-func (p *Parser) parseExpression() (Expression, error) {
-	ep := ExpressionParser{}
-	if err := ep.Consume(p); err != nil {
-		return nil, err
-	}
-	return ep.Parse()
-
-	// infix, err := p.scanInfixTerms()
-	// if err != nil {
-	// 	return nil, err
-	// }
-
-	// sh := &shuntingYard{}
-
-	// if err := sh.PushInfix(infix); err != nil {
-	// 	return nil, err
-	// }
-
-	// expr, err := sh.ParseExpression()
-	// if err != nil {
-	// 	return nil, err
-	// }
-
-	// op, err := p.scanComparisonOp()
-	// if err != nil {
-	// 	return nil, err
-	// }
-	// if op == nil {
-	// 	return expr, nil
-	// }
-
-	// rhs, err := p.parseExpression()
-	// if err != nil {
-	// 	return nil, err
-	// }
-
-	// expr = &ComparisonExpression{
-	// 	// Op: ,
-	// 	Left:  expr,
-	// 	Right: rhs,
-	// }
-
-	// return expr, nil
 }
 
 // func (p *Parser) scanExpression() ([]*Token, error) {
@@ -664,7 +619,7 @@ func (p *Parser) parseTablesExpression() (*TablesExpression, error) {
 }
 
 func (p *Parser) parseJoinOnPredicate() (*JoinOnPredicate, error) {
-	left, err := p.parseExpression()
+	left, err := (&ExpressionParser{}).Parse(p)
 	if err != nil {
 		return nil, err
 	}

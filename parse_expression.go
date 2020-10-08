@@ -7,12 +7,17 @@ import (
 	"github.com/pkg/errors"
 )
 
+// ExpressionParser scans and then parses an
+// infix expression using the Shunting Yard algorithm.
 type ExpressionParser struct {
 	output []*Token
 	stack  []*Token
 }
 
-func (s *ExpressionParser) Consume(p *Parser) error {
+func (s *ExpressionParser) scanShuntingYard(p *Parser) error {
+	s.output = nil
+	s.stack = nil
+
 	pushOutput := func(t *Token) {
 		s.output = append(s.output, t)
 	}
@@ -43,10 +48,10 @@ func (s *ExpressionParser) Consume(p *Parser) error {
 				return err
 			}
 
+			switch t.Type {
 			// if the term is a operand, then:
 			//     push it to the output queue.
-			switch t.Type {
-			case NUMERIC, STRING, IDENT, DOT:
+			case NUMERIC, STRING, NULL, TRUE, FALSE, IDENT, DOT:
 				pushOutput(t)
 			// else if the term is a function then:
 			//     push it onto the operator stack
@@ -75,17 +80,23 @@ func (s *ExpressionParser) Consume(p *Parser) error {
 			//     if there is a left parenthesis at the top of the operator stack, then:
 			//         pop the operator from the operator stack and discard it
 			case RPAREN:
-				top := popStack()
-				for ; top != nil && top.Type != LPAREN; top = popStack() {
-					pushOutput(top)
+				for top := peekStack(); top.Type != LPAREN; top = peekStack() {
+					pushOutput(popStack())
 				}
-				if top == nil {
-					return errors.Errorf("mismatched parenthesis at line %d position %d", t.Line, t.Pos)
-				}
-				if top.Type != LPAREN {
-					pushStack(top)
-				}
+				popStack() // discard LPAREN
+
+				// top := popStack()
+				// for ; top != nil && top.Type != LPAREN; top = popStack() {
+				// 	pushOutput(top)
+				// }
+				// if top == nil {
+				// 	return errors.Errorf("mismatched parenthesis at line %d position %d", t.Line, t.Pos)
+				// }
+				// if top.Type != LPAREN {
+				// 	pushStack(top)
+				// }
 			default:
+				p.unscan()
 				return nil
 			}
 		}
@@ -108,7 +119,13 @@ func (s *ExpressionParser) Consume(p *Parser) error {
 	return nil
 }
 
-func (s *ExpressionParser) Parse() (Expression, error) {
+// Parse scans and parses an infix expression using the Shunting Yard algorithm
+// to produce an Expression AST.
+func (s *ExpressionParser) Parse(p *Parser) (Expression, error) {
+	if err := s.scanShuntingYard(p); err != nil {
+		return nil, err
+	}
+
 	if len(s.output) == 0 {
 		return nil, nil
 	}
@@ -133,18 +150,30 @@ func (s *ExpressionParser) Parse() (Expression, error) {
 			expr = &OperandExpression{
 				Numeric: &f,
 			}
+		case TRUE, FALSE:
+			b, err := strconv.ParseBool(string(t.Raw))
+			if err != nil {
+				return nil, err
+			}
+			expr = &OperandExpression{
+				Boolean: &b,
+			}
+		case NULL:
+			expr = &OperandExpression{
+				Null: true,
+			}
 		case IDENT:
-			field := Field{
-				Name: unquote(t.Raw),
+			ident := Ident{
+				Field: unquote(t.Raw),
 			}
 			if i < len(s.output)-2 && s.output[i+1].Type == DOT {
-				field.Table = unquote(s.output[i+2].Raw)
+				ident.Table = unquote(s.output[i+2].Raw)
 				i += 2
 			}
 			expr = &OperandExpression{
-				Field: &field,
+				Ident: &ident,
 			}
-		case PLUS, MINUS, ASTERISK, SLASH, PERCENT, AND, OR, EQ, NEQ, LT, LTE, GT, GTE:
+		case PLUS, MINUS, ASTERISK, SLASH, PERCENT:
 			right := exprs[len(exprs)-1]
 			left := exprs[len(exprs)-2]
 			exprs = exprs[:len(exprs)-2]
@@ -153,6 +182,27 @@ func (s *ExpressionParser) Parse() (Expression, error) {
 				Left:  left,
 				Right: right,
 			}
+		case AND, OR:
+			right := exprs[len(exprs)-1]
+			left := exprs[len(exprs)-2]
+			exprs = exprs[:len(exprs)-2]
+			if _, ok := left.(*PredicateExpression); !ok {
+
+			}
+			expr = &PredicateExpression{
+				Predicate: t.Type,
+				Left:      left,
+				Right:     right,
+			}
+		case EQ, NEQ, LT, LTE, GT, GTE:
+			right := exprs[len(exprs)-1]
+			left := exprs[len(exprs)-2]
+			exprs = exprs[:len(exprs)-2]
+			expr = &PredicateExpression{
+				Predicate: t.Type,
+				Left:      left,
+				Right:     right,
+			}
 		case COUNT, SUM, MIN, MAX, AVG:
 			arg := exprs[len(exprs)-1]
 			exprs = exprs[:len(exprs)-1]
@@ -160,7 +210,6 @@ func (s *ExpressionParser) Parse() (Expression, error) {
 				Func: t.Type,
 				Args: []Expression{arg},
 			}
-		// case // TODO: AND,OR,EQ,NEQ,LT,LTE,GT,GTE
 		default:
 			return nil, fmt.Errorf("invalid expression token %s at line %d position %d", t, t.Line, t.Pos)
 		}
@@ -169,25 +218,27 @@ func (s *ExpressionParser) Parse() (Expression, error) {
 	}
 
 	if len(exprs) != 1 {
-		fmt.Println(jsonify(exprs))
 		panic("reverse polish notation mismatch")
 	}
 
 	return exprs[0], nil
 }
 
+// larger numbers indicate greater precedence
 func precedence(a *Token) int {
 	switch a.Type {
-	case EQ, NEQ, LT, LTE, GT, GTE:
-		return 1
 	case OR:
-		return 2
+		return 1
 	case AND:
+		return 2
+	case EQ, NEQ, LT, LTE, GT, GTE:
 		return 3
 	case PLUS, MINUS:
 		return 4
 	case ASTERISK, SLASH, PERCENT:
 		return 5
+	case COUNT, SUM, MIN, MAX, AVG:
+		return 6
 	default:
 		return 0
 	}

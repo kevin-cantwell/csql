@@ -6,14 +6,14 @@ type Statement struct {
 
 type SelectStatement struct {
 	Distinct bool           `json:"DISTINCT,omitempty"`
-	Cols     []SelectColumn `json:"cols,omitempty"`
+	Cols     []SelectColumn `json:"columns,omitempty"`
 	From     *FromClause    `json:"FROM,omitempty"`
 }
 
 type SelectColumn struct {
 	// if true, other fields ignored
 	Star bool       `json:"star,omitempty"`
-	Expr Expression `json:"expr,omitempty"`
+	Expr Expression `json:"expression,omitempty"`
 	As   string     `json:"AS,omitempty"`
 }
 
@@ -22,7 +22,7 @@ type Expression interface {
 }
 
 type OperatorExpression struct {
-	Op    TokenType  `json:"op"`
+	Op    TokenType  `json:"operator"`
 	Left  Expression `json:"left"`
 	Right Expression `json:"right"`
 }
@@ -30,7 +30,7 @@ type OperatorExpression struct {
 func (expr *OperatorExpression) expression() {}
 
 type FunctionExpression struct {
-	Func TokenType    `json:"func"`
+	Func TokenType    `json:"function"`
 	Args []Expression `json:"args"`
 }
 
@@ -39,22 +39,32 @@ func (expr *FunctionExpression) expression() {}
 type OperandExpression struct {
 	String  *string  `json:"string,omitempty"`
 	Numeric *float64 `json:"numeric,omitempty"`
-	Field   *Field   `json:"field,omitempty"`
+	Ident   *Ident   `json:"identity,omitempty"`
+	Boolean *bool    `json:"boolean,omitempty"`
+	Null    bool     `json:"null,omitempty"`
 }
 
 func (expr *OperandExpression) expression() {}
 
+type PredicateExpression struct {
+	Predicate TokenType  `json:"predicate"` // AND, OR, =, !=, <. <=, >, >=
+	Left      Expression `json:"left"`
+	Right     Expression `json:"right"`
+}
+
+func (expr *PredicateExpression) expression() {}
+
 type ComparisonExpression struct {
-	Op    TokenType // =, !=, <. <=, >, >=
-	Left  Expression
-	Right Expression
+	Comparison TokenType  `json:"comparison"` // =, !=, <. <=, >, >=
+	Left       Expression `json:"left"`
+	Right      Expression `json:"right"`
 }
 
 func (expr *ComparisonExpression) expression() {}
 
-type Field struct {
+type Ident struct {
 	Table string `json:"table,omitempty"`
-	Name  string `json:"name"`
+	Field string `json:"name"`
 }
 
 type FromClause struct {
