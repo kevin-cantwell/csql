@@ -3,133 +3,130 @@ package csql
 import (
 	"fmt"
 	"strconv"
+
+	"github.com/pkg/errors"
 )
 
-// exprTerm represents an expression exprTerm: a operand, operator, function, or parenthesis
-type exprTerm []*Token
-
-func (t exprTerm) isOperand() bool {
-	return tokenIn(t.typ(), NUMERIC, STRING, IDENT)
+type ExpressionParser struct {
+	output []*Token
+	stack  []*Token
 }
 
-func (t exprTerm) isOperator() bool {
-	return tokenIn(t.typ(), PLUS, MINUS, ASTERISK, SLASH, PERCENT)
-}
-
-func (t exprTerm) isFunction() bool {
-	return tokenIn(t.typ(), COUNT, SUM, AVG, MIN, MAX)
-}
-
-func (t exprTerm) isLeftParen() bool {
-	return tokenIn(t.typ(), LPAREN)
-}
-
-func (t exprTerm) isRightParen() bool {
-	return tokenIn(t.typ(), RPAREN)
-}
-
-func (t exprTerm) typ() TokenType {
-	if len(t) == 0 {
-		return ILLEGAL
+func (s *ExpressionParser) Consume(p *Parser) error {
+	pushOutput := func(t *Token) {
+		s.output = append(s.output, t)
 	}
-	return t[0].Type
-}
-
-func (t exprTerm) String() string {
-	var s string
-	for _, token := range t {
-		s += string(token.Raw)
+	pushStack := func(t *Token) {
+		s.stack = append(s.stack, t)
 	}
-	return s
-}
+	popStack := func() *Token {
+		if len(s.stack) == 0 {
+			return nil
+		}
+		pop := s.stack[len(s.stack)-1]
+		s.stack = s.stack[:len(s.stack)-1]
+		return pop
+	}
+	peekStack := func() *Token {
+		if len(s.stack) == 0 {
+			return nil
+		}
+		return s.stack[len(s.stack)-1]
+	}
 
-// shuntingYard processes an infix expression and
-type shuntingYard struct {
-	output []exprTerm
-	stack  []exprTerm
-}
+	err := func() error {
+		// while there are term to be read:
+		//     read a term.
+		for {
+			t, err := p.scanSkipWS()
+			if err != nil {
+				return err
+			}
 
-func (s *shuntingYard) PushInfix(infix []exprTerm) error {
-	// while there are term to be read:
-	//     read a term.
-	for _, term := range infix {
-		switch {
-		// if the term is a operand, then:
-		//     push it to the output queue.
-		case term.isOperand():
-
-			s.pushOutput(term)
-		// else if the term is a function then:
-		//     push it onto the operator stack
-		case term.isFunction():
-			s.pushStack(term)
-		// else if the term is an operator then:
-		//     while ((there is an operator at the top of the operator stack)
-		//             and ((the operator at the top of the operator stack has greater precedence)
-		// 	               or (the operator at the top of the operator stack has equal precedence and the term is left associative))
-		//             and (the operator at the top of the operator stack is not a left parenthesis)):
-		//         pop operators from the operator stack onto the output queue.
-		//     push it onto the operator stack.
-		case term.isOperator():
-			for peek := s.peekStack(); peek != nil && !peek.isLeftParen() && s.opPrecedes(peek, term); peek = s.peekStack() {
-				s.pushOutput(s.popStack())
-			}
-			// for top := s.popStack(); top != nil && !top.isLeftParen() && s.opPrecedes(top, term); top = s.popStack() {
-			// 	s.pushOutput(top)
-			// }
-			s.pushStack(term)
-		// else if the term is a left parenthesis (i.e. "("), then:
-		//     push it onto the operator stack.
-		case term.isLeftParen():
-			s.pushStack(term)
-		// else if the term is a right parenthesis (i.e. ")"), then:
-		//     while the operator at the top of the operator stack is not a left parenthesis:
-		//         pop the operator from the operator stack onto the output queue.
-		//	   /* If the stack runs out without finding a left parenthesis, then there are mismatched parentheses. */
-		//     if there is a left parenthesis at the top of the operator stack, then:
-		//         pop the operator from the operator stack and discard it
-		case term.isRightParen():
-			top := s.popStack()
-			for ; top != nil && !top.isLeftParen(); top = s.popStack() {
-				s.pushOutput(top)
-			}
-			if top == nil {
-				return fmt.Errorf("missing left paren")
-			}
-			if !top.isLeftParen() {
-				s.pushStack(top)
+			// if the term is a operand, then:
+			//     push it to the output queue.
+			switch t.Type {
+			case NUMERIC, STRING, IDENT, DOT:
+				pushOutput(t)
+			// else if the term is a function then:
+			//     push it onto the operator stack
+			case COUNT, SUM, AVG, MIN, MAX:
+				pushStack(t)
+			// else if the term is an operator then:
+			//     while ((there is an operator at the top of the operator stack)
+			//             and ((the operator at the top of the operator stack has greater precedence)
+			// 	               or (the operator at the top of the operator stack has equal precedence and the term is left associative))
+			//             and (the operator at the top of the operator stack is not a left parenthesis)):
+			//         pop operators from the operator stack onto the output queue.
+			//     push it onto the operator stack.
+			case PLUS, MINUS, ASTERISK, SLASH, PERCENT, AND, OR, EQ, NEQ, LT, LTE, GT, GTE:
+				for top := peekStack(); top != nil && top.Type != LPAREN && precedence(top) > precedence(t); top = peekStack() {
+					pushOutput(popStack())
+				}
+				pushStack(t)
+			// else if the term is a left parenthesis (i.e. "("), then:
+			//     push it onto the operator stack.
+			case LPAREN:
+				pushStack(t)
+			// else if the term is a right parenthesis (i.e. ")"), then:
+			//     while the operator at the top of the operator stack is not a left parenthesis:
+			//         pop the operator from the operator stack onto the output queue.
+			//	   /* If the stack runs out without finding a left parenthesis, then there are mismatched parentheses. */
+			//     if there is a left parenthesis at the top of the operator stack, then:
+			//         pop the operator from the operator stack and discard it
+			case RPAREN:
+				top := popStack()
+				for ; top != nil && top.Type != LPAREN; top = popStack() {
+					pushOutput(top)
+				}
+				if top == nil {
+					return errors.Errorf("mismatched parenthesis at line %d position %d", t.Line, t.Pos)
+				}
+				if top.Type != LPAREN {
+					pushStack(top)
+				}
+			default:
+				return nil
 			}
 		}
+	}()
+	if err != nil {
+		return err
 	}
+
 	// if there are no more tokens to read then:
 	//     while there are still operator tokens on the stack:
 	//         /* If the operator token on the top of the stack is a parenthesis, then there are mismatched parentheses. */
 	//         pop the operator from the operator stack onto the output queue.
-	for pop := s.popStack(); pop != nil; pop = s.popStack() {
-		if pop.isLeftParen() || pop.isRightParen() {
-			return fmt.Errorf("extra parenthesis %q", pop[0].Raw)
+	for pop := popStack(); pop != nil; pop = popStack() {
+		if pop.Type == LPAREN || pop.Type == RPAREN {
+			return errors.Errorf("mismatched parenthesis at line %d position %d", pop.Line, pop.Pos)
 		}
-		s.pushOutput(pop)
+		pushOutput(pop)
 	}
 
 	return nil
 }
 
-func (s *shuntingYard) ParseExpression() (Expression, error) {
-	var stack []Expression
+func (s *ExpressionParser) Parse() (Expression, error) {
+	if len(s.output) == 0 {
+		return nil, nil
+	}
 
-	for _, term := range s.output {
+	// Parse the reverse polish notation and construct the expression
+	var exprs []Expression
+
+	for i := 0; i < len(s.output); i++ {
+		t := s.output[i]
 		var expr Expression
-		switch t := term.typ(); t {
+		switch t.Type {
 		case STRING:
-			token := term[0]
-			str := unquote(token.Raw)
+			str := unquote(t.Raw)
 			expr = &OperandExpression{
 				String: &str,
 			}
 		case NUMERIC:
-			token := term[0]
-			f, err := strconv.ParseFloat(string(token.Raw), 64)
+			f, err := strconv.ParseFloat(string(t.Raw), 64)
 			if err != nil {
 				return nil, err
 			}
@@ -137,84 +134,61 @@ func (s *shuntingYard) ParseExpression() (Expression, error) {
 				Numeric: &f,
 			}
 		case IDENT:
-			var field Field
-			if len(term) == 3 {
-				field.Table = unquote(term[0].Raw)
-				field.Name = unquote(term[2].Raw)
-			} else {
-				field.Name = unquote(term[0].Raw)
+			field := Field{
+				Name: unquote(t.Raw),
+			}
+			if i < len(s.output)-2 && s.output[i+1].Type == DOT {
+				field.Table = unquote(s.output[i+2].Raw)
+				i += 2
 			}
 			expr = &OperandExpression{
 				Field: &field,
 			}
-		case PLUS, MINUS, ASTERISK, SLASH, PERCENT:
-			right := stack[len(stack)-1]
-			left := stack[len(stack)-2]
-			stack = stack[:len(stack)-2]
+		case PLUS, MINUS, ASTERISK, SLASH, PERCENT, AND, OR, EQ, NEQ, LT, LTE, GT, GTE:
+			right := exprs[len(exprs)-1]
+			left := exprs[len(exprs)-2]
+			exprs = exprs[:len(exprs)-2]
 			expr = &OperatorExpression{
-				Op:    t,
+				Op:    t.Type,
 				Left:  left,
 				Right: right,
 			}
 		case COUNT, SUM, MIN, MAX, AVG:
-			arg := stack[len(stack)-1]
-			stack = stack[:len(stack)-1]
+			arg := exprs[len(exprs)-1]
+			exprs = exprs[:len(exprs)-1]
 			expr = &FunctionExpression{
-				Func: t,
+				Func: t.Type,
 				Args: []Expression{arg},
 			}
+		// case // TODO: AND,OR,EQ,NEQ,LT,LTE,GT,GTE
 		default:
-			return nil, fmt.Errorf("invalid expression syntax")
+			return nil, fmt.Errorf("invalid expression token %s at line %d position %d", t, t.Line, t.Pos)
 		}
 
-		stack = append(stack, expr)
+		exprs = append(exprs, expr)
 	}
 
-	if len(stack) != 1 {
-		for _, expr := range stack {
-			fmt.Printf("%+v\n", expr)
-		}
+	if len(exprs) != 1 {
+		fmt.Println(jsonify(exprs))
 		panic("reverse polish notation mismatch")
 	}
 
-	return stack[0], nil
+	return exprs[0], nil
 }
 
-func (s *shuntingYard) pushOutput(term exprTerm) {
-	s.output = append(s.output, term)
-}
-
-func (s *shuntingYard) pushStack(term exprTerm) {
-	s.stack = append(s.stack, term)
-}
-
-func (s *shuntingYard) popStack() exprTerm {
-	if len(s.stack) == 0 {
-		return nil
+func precedence(a *Token) int {
+	switch a.Type {
+	case EQ, NEQ, LT, LTE, GT, GTE:
+		return 1
+	case OR:
+		return 2
+	case AND:
+		return 3
+	case PLUS, MINUS:
+		return 4
+	case ASTERISK, SLASH, PERCENT:
+		return 5
+	default:
+		return 0
 	}
-	pop := s.stack[len(s.stack)-1]
-	s.stack = s.stack[:len(s.stack)-1]
-	return pop
-}
-
-func (s *shuntingYard) peekStack() exprTerm {
-	if len(s.stack) == 0 {
-		return nil
-	}
-	return s.stack[len(s.stack)-1]
-}
-
-func (s *shuntingYard) opPrecedes(a, b exprTerm) bool {
-	if !a.isOperator() || !b.isOperator() {
-		panic("non-operator precedence check")
-	}
-	atok := a[len(a)-1].Type
-	btok := b[len(b)-1].Type
-	if tokenIn(atok, PLUS, MINUS) {
-		return false
-	}
-	if tokenIn(btok, PLUS, MINUS) {
-		return true
-	}
-	return false
 }

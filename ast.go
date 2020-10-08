@@ -6,8 +6,8 @@ type Statement struct {
 
 type SelectStatement struct {
 	Distinct bool           `json:"DISTINCT,omitempty"`
-	Cols     []SelectColumn `json:"cols"`
-	From     FromClause     `json:"FROM"`
+	Cols     []SelectColumn `json:"cols,omitempty"`
+	From     *FromClause    `json:"FROM,omitempty"`
 }
 
 type SelectColumn struct {

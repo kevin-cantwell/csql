@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"strings"
 
 	"github.com/kevin-cantwell/csql"
 )
@@ -16,18 +17,20 @@ func main() {
 
 	enc := json.NewEncoder(os.Stdout)
 
-	p := csql.NewParser(repl())
-	stmts, err := p.Parse()
-	if err != nil {
-		fmt.Printf("%+v\n", err)
-		panic(err)
-	}
-	for _, stmt := range stmts {
-		if err := enc.Encode(stmt); err != nil {
+	scan := bufio.NewScanner(os.Stdin)
+	for scan.Scan() {
+		p := csql.NewParser(strings.NewReader(scan.Text()))
+		stmts, err := p.Parse()
+		if err != nil {
+			fmt.Printf("%+v\n", err)
 			panic(err)
 		}
+		for _, stmt := range stmts {
+			if err := enc.Encode(stmt); err != nil {
+				panic(err)
+			}
+		}
 	}
-
 }
 
 func repl() io.Reader {

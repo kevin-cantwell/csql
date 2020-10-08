@@ -14,6 +14,9 @@ type Token struct {
 }
 
 func (t *Token) String() string {
+	if t.Type == EOF {
+		return "EOF"
+	}
 	return string(t.Raw)
 }
 
