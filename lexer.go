@@ -128,7 +128,16 @@ func (l *Lexer) scanString() (*Token, error) {
 
 	switch quote {
 	case '\'':
-		return l.scanQuote()
+		raw, err := l.scanQuote()
+		if err != nil {
+			return nil, err
+		}
+		return &Token{
+			Type: STRING,
+			Raw:  raw,
+			Line: l.line,
+			Pos:  l.pos - len(raw),
+		}, nil
 	default:
 		return nil, nil
 	}
@@ -247,7 +256,16 @@ func (l *Lexer) scanIdent() (*Token, error) {
 		return nil, err
 	}
 	if peek == '"' {
-		return l.scanQuote()
+		raw, err := l.scanQuote()
+		if err != nil {
+			return nil, err
+		}
+		return &Token{
+			Type: IDENT,
+			Raw:  raw,
+			Line: l.line,
+			Pos:  l.pos - len(raw),
+		}, nil
 	}
 
 	var raw []byte
@@ -279,7 +297,7 @@ func (l *Lexer) scanIdent() (*Token, error) {
 	}
 }
 
-func (l *Lexer) scanQuote() (*Token, error) {
+func (l *Lexer) scanQuote() ([]byte, error) {
 	quote, err := l.read()
 	if err != nil {
 		return nil, err
@@ -316,12 +334,7 @@ func (l *Lexer) scanQuote() (*Token, error) {
 			raw = append(raw, seq...)
 		case quote:
 			raw = append(raw, quote)
-			return &Token{
-				Type: STRING,
-				Raw:  raw,
-				Line: l.line,
-				Pos:  l.pos - len(raw),
-			}, nil
+			return raw, nil
 		default:
 			raw = append(raw, ch)
 		}
