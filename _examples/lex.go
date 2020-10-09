@@ -23,6 +23,11 @@ func main() {
 			if err != nil {
 				panic(err)
 			}
+			if tok.Type == csql.EOF {
+				table.Render() // Send output
+				table.ClearRows()
+				os.Exit(0)
+			}
 			if tok.Type == csql.SEMICOLON {
 				table.Render() // Send output
 				table.ClearRows()

@@ -18,53 +18,88 @@ type SelectColumn struct {
 }
 
 type Expression interface {
-	expression()
+	at() (Token, Token)
 }
 
 type OperatorExpression struct {
-	Op    TokenType  `json:"operator"`
+	Op    Token      `json:"operator"`
 	Left  Expression `json:"left"`
 	Right Expression `json:"right"`
 }
 
-func (expr *OperatorExpression) expression() {}
+func (e *OperatorExpression) at() (Token, Token) {
+	left, _ := e.Left.at()
+	_, right := e.Right.at()
+	return left, right
+}
 
 type FunctionExpression struct {
-	Func TokenType    `json:"function"`
+	Func Token        `json:"function"`
 	Args []Expression `json:"args"`
 }
 
-func (expr *FunctionExpression) expression() {}
-
-type OperandExpression struct {
-	String  *string  `json:"string,omitempty"`
-	Numeric *float64 `json:"numeric,omitempty"`
-	Ident   *Ident   `json:"identity,omitempty"`
-	Boolean *bool    `json:"boolean,omitempty"`
-	Null    bool     `json:"null,omitempty"`
+func (e *FunctionExpression) at() (Token, Token) {
+	_, right := e.Args[len(e.Args)-1].at()
+	return e.Func, right
 }
 
-func (expr *OperandExpression) expression() {}
+type OperandExpression struct {
+	String  *Token `json:"string,omitempty"`
+	Numeric *Token `json:"numeric,omitempty"`
+	Ident   *Ident `json:"identity,omitempty"`
+	Boolean *Token `json:"boolean,omitempty"`
+	Null    *Token `json:"null,omitempty"`
+}
+
+func (e *OperandExpression) at() (Token, Token) {
+	switch {
+	case e.String != nil:
+		return *e.String, *e.String
+	case e.Numeric != nil:
+		return *e.Numeric, *e.Numeric
+	case e.Ident != nil:
+		right := e.Ident.Field
+		left := right
+		if e.Ident.Table != nil {
+			left = *e.Ident.Table
+		}
+		return left, right
+	case e.Boolean != nil:
+		return *e.Boolean, *e.Boolean
+	case e.Null != nil:
+		return *e.Null, *e.Null
+	default:
+		panic("nil operand expression")
+	}
+}
 
 type PredicateExpression struct {
-	Predicate TokenType  `json:"predicate"` // AND, OR, =, !=, <. <=, >, >=
+	Predicate Token      `json:"predicate"` // AND, OR, =, !=, <. <=, >, >=
 	Left      Expression `json:"left"`
 	Right     Expression `json:"right"`
 }
 
-func (expr *PredicateExpression) expression() {}
+func (e *PredicateExpression) at() (Token, Token) {
+	left, _ := e.Left.at()
+	_, right := e.Right.at()
+	return left, right
+}
 
 type ComparisonExpression struct {
-	Comparison TokenType  `json:"comparison"` // =, !=, <. <=, >, >=
+	Comparison Token      `json:"comparison"` // =, !=, <. <=, >, >=
 	Left       Expression `json:"left"`
 	Right      Expression `json:"right"`
 }
 
-func (expr *ComparisonExpression) expression() {}
+func (e *ComparisonExpression) at() (Token, Token) {
+	left, _ := e.Left.at()
+	_, right := e.Right.at()
+	return left, right
+}
 
 type Ident struct {
-	Table string `json:"table,omitempty"`
-	Field string `json:"name"`
+	Table *Token `json:"table,omitempty"`
+	Field Token  `json:"field"`
 }
 
 type FromClause struct {
@@ -85,7 +120,7 @@ type TablesExpression struct {
 }
 
 type JoinOnPredicate struct {
-	Op    TokenType  `json:"op"`
+	Op    Token      `json:"op"`
 	Left  Expression `json:"left"`
 	Right Expression `json:"right"`
 }
@@ -95,12 +130,12 @@ type Predicate interface {
 }
 
 type FunctionPredicate struct {
-	Op   TokenType // NOT, IN, BETWEEN, IS
+	Op   Token // NOT, IN, BETWEEN, IS
 	Args []Expression
 }
 
 type AndPredicate struct {
-	Op    TokenType `json:"op"`
+	Op    Token `json:"op"`
 	Left  Predicate
 	Right Predicate
 }

@@ -2,11 +2,12 @@ package csql
 
 import (
 	"bufio"
-	"fmt"
 	"io"
 	"strconv"
 	"strings"
 	"unicode"
+
+	"github.com/pkg/errors"
 )
 
 // eof represents a marker byte for the end of the reader.
@@ -19,6 +20,7 @@ type Lexer struct {
 	r    *bufio.Reader
 	line int
 	pos  int
+	eof  bool
 }
 
 // NewLexer returns a new instance of Lexer.
@@ -37,8 +39,8 @@ func (l *Lexer) Scan() (*Token, error) {
 		l.scanWS,
 		l.scanString,
 		l.scanNumeric,
-		l.scanSymbol,
 		l.scanIdent,
+		l.scanSymbol,
 		l.scanKeyword,
 	} {
 		tok, err := scan()
@@ -46,6 +48,7 @@ func (l *Lexer) Scan() (*Token, error) {
 			return nil, err
 		}
 		if tok != nil {
+			// fmt.Println(jsonify(tok))
 			return tok, nil
 		}
 	}
@@ -250,14 +253,56 @@ func (l *Lexer) scanKeyword() (*Token, error) {
 	return nil, nil
 }
 
-func (l *Lexer) scanIdent() (*Token, error) {
+func (l *Lexer) scanIdent() (t *Token, e error) {
+	// defer func() {
+	// 	if t != nil {
+	// 		fmt.Printf("scanIdent:%q\n", t.Raw)
+	// 	} else {
+	// 		fmt.Printf("scanIdent:%v\n", e)
+	// 	}
+	// }()
+	var raw []byte
+
 	peek, err := l.peek()
 	if err != nil {
 		return nil, err
 	}
 	if peek == '"' {
-		raw, err := l.scanQuote()
+		raw, err = l.scanQuote()
 		if err != nil {
+			return nil, err
+		}
+	} else {
+		for i := 0; ; i++ {
+			peek, err := l.peekAfter(i)
+			if err != nil {
+				return nil, err
+			}
+			if isIdent(peek) {
+				raw = append(raw, peek)
+				continue
+			}
+			if i == 0 {
+				return nil, nil
+			}
+			if isKeyword(string(raw)) {
+				return nil, nil
+			}
+			raw, err = l.readN(i)
+			if err != nil {
+				return nil, err
+			}
+			break
+		}
+	}
+
+	dot, err := l.read()
+	if err != nil {
+		e = err
+		return
+	}
+	if dot != '.' {
+		if err := l.unread(); err != nil {
 			return nil, err
 		}
 		return &Token{
@@ -267,34 +312,20 @@ func (l *Lexer) scanIdent() (*Token, error) {
 			Pos:  l.pos - len(raw),
 		}, nil
 	}
+	raw = append(raw, '.')
 
-	var raw []byte
-	for i := 0; ; i++ {
-		peek, err := l.peekAfter(i)
-		if err != nil {
-			return nil, err
-		}
-		if isIdent(peek) {
-			raw = append(raw, peek)
-			continue
-		}
-		if i > 0 {
-			if isKeyword(string(raw)) {
-				return nil, nil
-			}
-			raw, err := l.readN(i)
-			if err != nil {
-				return nil, err
-			}
-			return &Token{
-				Type: IDENT,
-				Raw:  raw,
-				Line: l.line,
-				Pos:  l.pos - len(raw),
-			}, nil
-		}
-		return nil, nil
+	suffix, err := l.scanIdent()
+	if suffix == nil {
+		e = err
+		return
 	}
+	raw = append(raw, suffix.Raw...)
+	return &Token{
+		Type: IDENT,
+		Raw:  raw,
+		Line: l.line,
+		Pos:  l.pos - len(raw),
+	}, nil
 }
 
 func (l *Lexer) scanQuote() ([]byte, error) {
@@ -310,10 +341,9 @@ func (l *Lexer) scanQuote() ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-
 		switch ch {
 		case eof:
-			return nil, fmt.Errorf("mismatched quote")
+			return nil, errors.Errorf("mismatched quote")
 		case '\\':
 			escaped, err := l.read()
 			if err != nil {
@@ -325,7 +355,7 @@ func (l *Lexer) scanQuote() ([]byte, error) {
 			}
 			n, ok := escapeChars[escaped]
 			if !ok {
-				return nil, fmt.Errorf("unkown escape sequence: '\\%s'", string(escaped))
+				return nil, errors.Errorf("unkown escape sequence: '\\%s'", string(escaped))
 			}
 			seq, err := l.readN(n)
 			if err != nil {
@@ -358,8 +388,13 @@ func (l *Lexer) scanIllegal() (*Token, error) {
 // read reads the next byte from the buffered reader.
 // Returns the byte(0) if an error occurs (or io.EOF is returned).
 func (l *Lexer) read() (byte, error) {
+	if l.eof {
+		return eof, nil
+	}
 	ch, err := l.r.ReadByte()
 	if err == io.EOF {
+		l.eof = true
+		l.pos++
 		return eof, nil
 	}
 	if err != nil {
@@ -433,6 +468,9 @@ func (l *Lexer) peekAfter(n int) (byte, error) {
 
 // unread places the previously read byte back on the reader.
 func (l *Lexer) unread() error {
+	if l.eof {
+		return nil
+	}
 	if err := l.r.UnreadByte(); err != nil {
 		return err
 	}
@@ -495,7 +533,7 @@ var (
 	symbols = []TokenType{
 		ASTERISK,
 		COMMA,
-		DOT,
+		// DOT,
 		LPAREN,
 		RPAREN,
 		LBRACKET,

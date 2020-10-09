@@ -33,7 +33,7 @@ func (t *Token) MarshalJSON() ([]byte, error) {
 }
 
 // Token represents a lexical token.
-type TokenType int
+type TokenType uint64
 
 func (t TokenType) MarshalJSON() ([]byte, error) {
 	return []byte(fmt.Sprintf("%q", t.String())), nil
@@ -41,7 +41,7 @@ func (t TokenType) MarshalJSON() ([]byte, error) {
 
 const (
 	// Special tokens
-	ILLEGAL TokenType = iota
+	ILLEGAL TokenType = 1 << iota
 	EOF
 	WS
 

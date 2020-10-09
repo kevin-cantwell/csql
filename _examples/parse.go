@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/kevin-cantwell/csql"
+	"github.com/pkg/errors"
 )
 
 func main() {
@@ -23,7 +24,7 @@ func main() {
 		stmts, err := p.Parse()
 		if err != nil {
 			fmt.Printf("%+v\n", err)
-			panic(err)
+			os.Exit(0)
 		}
 		for _, stmt := range stmts {
 			if err := enc.Encode(stmt); err != nil {
@@ -31,6 +32,10 @@ func main() {
 			}
 		}
 	}
+}
+
+type stackTracer interface {
+	StackTrace() errors.StackTrace
 }
 
 func repl() io.Reader {

@@ -2,7 +2,6 @@ package csql
 
 import (
 	"fmt"
-	"strconv"
 
 	"github.com/pkg/errors"
 )
@@ -40,6 +39,8 @@ func (s *ExpressionParser) scanShuntingYard(p *Parser) error {
 	}
 
 	err := func() error {
+		var prev TokenType
+
 		// while there are term to be read:
 		//     read a term.
 		for {
@@ -48,10 +49,35 @@ func (s *ExpressionParser) scanShuntingYard(p *Parser) error {
 				return err
 			}
 
+			// fmt.Println(jsonify(t))
+
 			switch t.Type {
 			// if the term is a operand, then:
 			//     push it to the output queue.
-			case NUMERIC, STRING, NULL, TRUE, FALSE, IDENT, DOT:
+			case IDENT:
+				pushOutput(t)
+				dot, err := p.scanSkipWS()
+				if err != nil {
+					return err
+				}
+				if dot.Type != DOT {
+					p.unscan()
+					continue
+				}
+				pushOutput(dot)
+				ident, err := p.scanSkipWS()
+				if err != nil {
+					return err
+				}
+				if ident.Type != IDENT {
+					return errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
+				}
+				pushOutput(ident)
+			case DOT:
+				if prev != IDENT {
+					return nil
+				}
+			case NUMERIC, STRING, NULL, TRUE, FALSE:
 				pushOutput(t)
 			// else if the term is a function then:
 			//     push it onto the operator stack
@@ -99,6 +125,8 @@ func (s *ExpressionParser) scanShuntingYard(p *Parser) error {
 				p.unscan()
 				return nil
 			}
+
+			prev = t.Type
 		}
 	}()
 	if err != nil {
@@ -130,98 +158,91 @@ func (s *ExpressionParser) Parse(p *Parser) (Expression, error) {
 		return nil, nil
 	}
 
-	// Parse the reverse polish notation and construct the expression
-	var exprs []Expression
+	return s.parseRPN(len(s.output) - 1)
+}
 
-	for i := 0; i < len(s.output); i++ {
-		t := s.output[i]
-		var expr Expression
-		switch t.Type {
-		case STRING:
-			str := unquote(t.Raw)
-			expr = &OperandExpression{
-				String: &str,
-			}
-		case NUMERIC:
-			f, err := strconv.ParseFloat(string(t.Raw), 64)
-			if err != nil {
-				return nil, err
-			}
-			expr = &OperandExpression{
-				Numeric: &f,
-			}
-		case TRUE, FALSE:
-			b, err := strconv.ParseBool(string(t.Raw))
-			if err != nil {
-				return nil, err
-			}
-			expr = &OperandExpression{
-				Boolean: &b,
-			}
-		case NULL:
-			expr = &OperandExpression{
-				Null: true,
-			}
-		case IDENT:
-			ident := Ident{
-				Field: unquote(t.Raw),
-			}
-			if i < len(s.output)-2 && s.output[i+1].Type == DOT {
-				ident.Table = unquote(s.output[i+2].Raw)
-				i += 2
-			}
-			expr = &OperandExpression{
-				Ident: &ident,
-			}
-		case PLUS, MINUS, ASTERISK, SLASH, PERCENT:
-			right := exprs[len(exprs)-1]
-			left := exprs[len(exprs)-2]
-			exprs = exprs[:len(exprs)-2]
-			expr = &OperatorExpression{
-				Op:    t.Type,
-				Left:  left,
-				Right: right,
-			}
-		case AND, OR:
-			right := exprs[len(exprs)-1]
-			left := exprs[len(exprs)-2]
-			exprs = exprs[:len(exprs)-2]
-			if _, ok := left.(*PredicateExpression); !ok {
+func (s *ExpressionParser) parseRPN(i int) (Expression, error) {
+	if i < 0 {
+		t := s.output[0]
+		return nil, errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
+	}
 
-			}
-			expr = &PredicateExpression{
-				Predicate: t.Type,
-				Left:      left,
-				Right:     right,
-			}
-		case EQ, NEQ, LT, LTE, GT, GTE:
-			right := exprs[len(exprs)-1]
-			left := exprs[len(exprs)-2]
-			exprs = exprs[:len(exprs)-2]
-			expr = &PredicateExpression{
-				Predicate: t.Type,
-				Left:      left,
-				Right:     right,
-			}
-		case COUNT, SUM, MIN, MAX, AVG:
-			arg := exprs[len(exprs)-1]
-			exprs = exprs[:len(exprs)-1]
-			expr = &FunctionExpression{
-				Func: t.Type,
-				Args: []Expression{arg},
-			}
-		default:
-			return nil, fmt.Errorf("invalid expression token %s at line %d position %d", t, t.Line, t.Pos)
+	var expr Expression
+
+	t := s.output[i]
+	switch t.Type {
+	case STRING:
+		expr = &OperandExpression{
+			String: t,
 		}
-
-		exprs = append(exprs, expr)
+	case NUMERIC:
+		expr = &OperandExpression{
+			Numeric: t,
+		}
+	case TRUE, FALSE:
+		expr = &OperandExpression{
+			Boolean: t,
+		}
+	case NULL:
+		expr = &OperandExpression{
+			Null: t,
+		}
+	case IDENT:
+		ident := Ident{
+			Field: *t,
+		}
+		if i >= 2 && s.output[i-1].Type == DOT {
+			ident.Table = s.output[i-2]
+		}
+		expr = &OperandExpression{
+			Ident: &ident,
+		}
+	case PLUS, MINUS, ASTERISK, SLASH, PERCENT:
+		left, err := s.parseRPN(i - 2)
+		if err != nil {
+			return nil, err
+		}
+		right, err := s.parseRPN(i - 1)
+		if err != nil {
+			return nil, err
+		}
+		expr = &OperatorExpression{
+			Op:    *t,
+			Left:  left,
+			Right: right,
+		}
+	case AND, OR, EQ, NEQ, LT, LTE, GT, GTE:
+		left, err := s.parseRPN(i - 2)
+		if err != nil {
+			return nil, err
+		}
+		right, err := s.parseRPN(i - 1)
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := left.(*PredicateExpression); !ok {
+			panic("todo")
+		}
+		expr = &PredicateExpression{
+			Predicate: *t,
+			Left:      left,
+			Right:     right,
+		}
+	case COUNT, SUM, MIN, MAX, AVG:
+		arg, err := s.parseRPN(i - 1)
+		if err != nil {
+			return nil, err
+		}
+		expr = &FunctionExpression{
+			Func: *t,
+			Args: []Expression{arg},
+		}
+	default:
+		fmt.Println(jsonify(s.output))
+		return nil, errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
 	}
 
-	if len(exprs) != 1 {
-		panic("reverse polish notation mismatch")
-	}
-
-	return exprs[0], nil
+	return expr, nil
 }
 
 // larger numbers indicate greater precedence
