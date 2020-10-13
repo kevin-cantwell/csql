@@ -46,7 +46,7 @@ func (e *FunctionExpression) at() (Token, Token) {
 type OperandExpression struct {
 	String  *Token `json:"string,omitempty"`
 	Numeric *Token `json:"numeric,omitempty"`
-	Ident   *Ident `json:"identity,omitempty"`
+	Ident   *Token `json:"identity,omitempty"`
 	Boolean *Token `json:"boolean,omitempty"`
 	Null    *Token `json:"null,omitempty"`
 }
@@ -58,12 +58,7 @@ func (e *OperandExpression) at() (Token, Token) {
 	case e.Numeric != nil:
 		return *e.Numeric, *e.Numeric
 	case e.Ident != nil:
-		right := e.Ident.Field
-		left := right
-		if e.Ident.Table != nil {
-			left = *e.Ident.Table
-		}
-		return left, right
+		return *e.Ident, *e.Ident
 	case e.Boolean != nil:
 		return *e.Boolean, *e.Boolean
 	case e.Null != nil:
@@ -95,11 +90,6 @@ func (e *ComparisonExpression) at() (Token, Token) {
 	left, _ := e.Left.at()
 	_, right := e.Right.at()
 	return left, right
-}
-
-type Ident struct {
-	Table *Token `json:"table,omitempty"`
-	Field Token  `json:"field"`
 }
 
 type FromClause struct {

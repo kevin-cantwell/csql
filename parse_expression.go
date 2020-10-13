@@ -1,8 +1,6 @@
 package csql
 
 import (
-	"fmt"
-
 	"github.com/pkg/errors"
 )
 
@@ -39,8 +37,6 @@ func (s *ExpressionParser) scanShuntingYard(p *Parser) error {
 	}
 
 	err := func() error {
-		var prev TokenType
-
 		// while there are term to be read:
 		//     read a term.
 		for {
@@ -49,34 +45,11 @@ func (s *ExpressionParser) scanShuntingYard(p *Parser) error {
 				return err
 			}
 
-			// fmt.Println(jsonify(t))
-
 			switch t.Type {
 			// if the term is a operand, then:
 			//     push it to the output queue.
 			case IDENT:
 				pushOutput(t)
-				dot, err := p.scanSkipWS()
-				if err != nil {
-					return err
-				}
-				if dot.Type != DOT {
-					p.unscan()
-					continue
-				}
-				pushOutput(dot)
-				ident, err := p.scanSkipWS()
-				if err != nil {
-					return err
-				}
-				if ident.Type != IDENT {
-					return errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
-				}
-				pushOutput(ident)
-			case DOT:
-				if prev != IDENT {
-					return nil
-				}
 			case NUMERIC, STRING, NULL, TRUE, FALSE:
 				pushOutput(t)
 			// else if the term is a function then:
@@ -125,8 +98,6 @@ func (s *ExpressionParser) scanShuntingYard(p *Parser) error {
 				p.unscan()
 				return nil
 			}
-
-			prev = t.Type
 		}
 	}()
 	if err != nil {
@@ -158,13 +129,17 @@ func (s *ExpressionParser) Parse(p *Parser) (Expression, error) {
 		return nil, nil
 	}
 
-	return s.parseRPN(len(s.output) - 1)
+	_, expr, err := s.parseRPN(len(s.output) - 1)
+	if err != nil {
+		return nil, err
+	}
+	return expr, nil
 }
 
-func (s *ExpressionParser) parseRPN(i int) (Expression, error) {
+func (s *ExpressionParser) parseRPN(i int) (int, Expression, error) {
 	if i < 0 {
 		t := s.output[0]
-		return nil, errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
+		return 0, nil, errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
 	}
 
 	var expr Expression
@@ -175,50 +150,50 @@ func (s *ExpressionParser) parseRPN(i int) (Expression, error) {
 		expr = &OperandExpression{
 			String: t,
 		}
+		return i - 1, expr, nil
 	case NUMERIC:
 		expr = &OperandExpression{
 			Numeric: t,
 		}
+		return i - 1, expr, nil
 	case TRUE, FALSE:
 		expr = &OperandExpression{
 			Boolean: t,
 		}
+		return i - 1, expr, nil
 	case NULL:
 		expr = &OperandExpression{
 			Null: t,
 		}
+		return i - 1, expr, nil
 	case IDENT:
-		ident := Ident{
-			Field: *t,
-		}
-		if i >= 2 && s.output[i-1].Type == DOT {
-			ident.Table = s.output[i-2]
-		}
 		expr = &OperandExpression{
-			Ident: &ident,
+			Ident: t,
 		}
+		return i - 1, expr, nil
 	case PLUS, MINUS, STAR, SLASH, PERCENT:
-		left, err := s.parseRPN(i - 2)
+		j, right, err := s.parseRPN(i - 1)
 		if err != nil {
-			return nil, err
+			return j, nil, err
 		}
-		right, err := s.parseRPN(i - 1)
+		j, left, err := s.parseRPN(j)
 		if err != nil {
-			return nil, err
+			return j, nil, err
 		}
 		expr = &OperatorExpression{
 			Op:    *t,
 			Left:  left,
 			Right: right,
 		}
+		return j, expr, nil
 	case AND, OR, EQ, NEQ, LT, LTE, GT, GTE:
-		left, err := s.parseRPN(i - 2)
+		j, right, err := s.parseRPN(i - 1)
 		if err != nil {
-			return nil, err
+			return 0, nil, err
 		}
-		right, err := s.parseRPN(i - 1)
+		j, left, err := s.parseRPN(j)
 		if err != nil {
-			return nil, err
+			return 0, nil, err
 		}
 		if _, ok := left.(*PredicateExpression); !ok {
 			panic("todo")
@@ -228,21 +203,20 @@ func (s *ExpressionParser) parseRPN(i int) (Expression, error) {
 			Left:      left,
 			Right:     right,
 		}
+		return j, expr, nil
 	case COUNT, SUM, MIN, MAX, AVG:
-		arg, err := s.parseRPN(i - 1)
+		j, arg, err := s.parseRPN(i - 1)
 		if err != nil {
-			return nil, err
+			return 0, nil, err
 		}
 		expr = &FunctionExpression{
 			Func: *t,
 			Args: []Expression{arg},
 		}
+		return j, expr, nil
 	default:
-		fmt.Println(jsonify(s.output))
-		return nil, errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
+		return 0, nil, errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
 	}
-
-	return expr, nil
 }
 
 // larger numbers indicate greater precedence
