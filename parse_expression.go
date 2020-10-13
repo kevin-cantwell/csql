@@ -90,7 +90,7 @@ func (s *ExpressionParser) scanShuntingYard(p *Parser) error {
 			//             and (the operator at the top of the operator stack is not a left parenthesis)):
 			//         pop operators from the operator stack onto the output queue.
 			//     push it onto the operator stack.
-			case PLUS, MINUS, ASTERISK, SLASH, PERCENT, AND, OR, EQ, NEQ, LT, LTE, GT, GTE:
+			case PLUS, MINUS, STAR, SLASH, PERCENT, AND, OR, EQ, NEQ, LT, LTE, GT, GTE:
 				for top := peekStack(); top != nil && top.Type != LPAREN && precedence(top) > precedence(t); top = peekStack() {
 					pushOutput(popStack())
 				}
@@ -197,7 +197,7 @@ func (s *ExpressionParser) parseRPN(i int) (Expression, error) {
 		expr = &OperandExpression{
 			Ident: &ident,
 		}
-	case PLUS, MINUS, ASTERISK, SLASH, PERCENT:
+	case PLUS, MINUS, STAR, SLASH, PERCENT:
 		left, err := s.parseRPN(i - 2)
 		if err != nil {
 			return nil, err
@@ -256,7 +256,7 @@ func precedence(a *Token) int {
 		return 3
 	case PLUS, MINUS:
 		return 4
-	case ASTERISK, SLASH, PERCENT:
+	case STAR, SLASH, PERCENT:
 		return 5
 	case COUNT, SUM, MIN, MAX, AVG:
 		return 6

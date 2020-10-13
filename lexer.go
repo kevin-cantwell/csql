@@ -18,6 +18,7 @@ const (
 // Lexer represents a lexical scanner.
 type Lexer struct {
 	r    *bufio.Reader
+	loc  []int
 	line int
 	pos  int
 	eof  bool
@@ -27,6 +28,7 @@ type Lexer struct {
 func NewLexer(r io.Reader) *Lexer {
 	return &Lexer{
 		r:    bufio.NewReader(r),
+		loc:  []int{1},
 		line: 1,
 		pos:  1,
 	}
@@ -39,20 +41,52 @@ func (l *Lexer) Scan() (*Token, error) {
 		l.scanWS,
 		l.scanString,
 		l.scanNumeric,
-		l.scanIdent,
 		l.scanSymbol,
 		l.scanKeyword,
+		l.scanIdent,
 	} {
 		tok, err := scan()
 		if err != nil {
 			return nil, err
 		}
 		if tok != nil {
-			// fmt.Println(jsonify(tok))
 			return tok, nil
 		}
 	}
 	return l.scanIllegal()
+}
+
+func (l *Lexer) Line(b4 int) int {
+	line := len(l.loc)
+	pos := l.loc[line-1]
+	for pos <= b4 {
+		b4 = b4 - pos
+		line--
+		pos = l.loc[line-1] - 1
+	}
+	return line
+}
+
+func (l *Lexer) Pos(b4 int) int {
+	line := len(l.loc)
+	pos := l.loc[line-1]
+	for pos <= b4 {
+		b4 = b4 - pos
+		line--
+		pos = l.loc[line-1] - 1
+	}
+	return pos - b4
+}
+
+func (l *Lexer) newToken(tok TokenType, raw []byte) (*Token, error) {
+	return &Token{
+		Type: tok,
+		Raw:  raw,
+		// Line: len(l.loc) - 1,
+		// Pos:  l.loc[len(l.loc)-1],
+		Line: l.Line(len(raw)),
+		Pos:  l.Pos(len(raw)),
+	}, nil
 }
 
 func (l *Lexer) scanEOF() (*Token, error) {
@@ -68,12 +102,7 @@ func (l *Lexer) scanEOF() (*Token, error) {
 		return nil, nil
 	}
 
-	return &Token{
-		Type: EOF,
-		Raw:  nil,
-		Line: l.line,
-		Pos:  l.pos,
-	}, nil
+	return l.newToken(EOF, nil)
 }
 
 func (l *Lexer) scanWS() (*Token, error) {
@@ -98,24 +127,14 @@ func (l *Lexer) scanWS() (*Token, error) {
 		}
 
 		if ch == eof {
-			return &Token{
-				Type: WS,
-				Raw:  raw,
-				Line: l.line,
-				Pos:  l.pos - len(raw),
-			}, nil
+			return l.newToken(WS, raw)
 		}
 
 		if !isWS(ch) {
 			if err := l.unread(); err != nil {
 				return nil, err
 			}
-			return &Token{
-				Type: WS,
-				Raw:  raw,
-				Line: l.line,
-				Pos:  l.pos - len(raw),
-			}, nil
+			return l.newToken(WS, raw)
 		}
 
 		raw = append(raw, ch)
@@ -135,12 +154,7 @@ func (l *Lexer) scanString() (*Token, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &Token{
-			Type: STRING,
-			Raw:  raw,
-			Line: l.line,
-			Pos:  l.pos - len(raw),
-		}, nil
+		return l.newToken(STRING, raw)
 	default:
 		return nil, nil
 	}
@@ -181,34 +195,24 @@ func (l *Lexer) scanNumeric() (*Token, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Token{
-		Type: NUMERIC,
-		Raw:  raw,
-		Line: l.line,
-		Pos:  l.pos - len(raw),
-	}, nil
+	return l.newToken(NUMERIC, raw)
 }
 
 func (l *Lexer) scanSymbol() (*Token, error) {
-	for _, symbol := range symbols {
-		n := len([]byte(symbol.String()))
+	for typ, symbol := range symbols {
+		n := len([]byte(symbol))
 
 		peek, err := l.peekN(n)
 		if err != nil {
 			return nil, err
 		}
 
-		if string(peek) == symbol.String() {
+		if string(peek) == symbol {
 			raw, err := l.readN(n)
 			if err != nil {
 				return nil, err
 			}
-			return &Token{
-				Type: symbol,
-				Raw:  raw,
-				Line: l.line,
-				Pos:  l.pos - len(raw),
-			}, nil
+			return l.newToken(typ, raw)
 		}
 	}
 
@@ -216,8 +220,8 @@ func (l *Lexer) scanSymbol() (*Token, error) {
 }
 
 func (l *Lexer) scanKeyword() (*Token, error) {
-	for _, keyword := range keywords {
-		n := len([]byte(keyword.String()))
+	for typ, keyword := range keywords {
+		n := len([]byte(keyword))
 
 		peek, err := l.peekN(n)
 		if err != nil {
@@ -225,7 +229,7 @@ func (l *Lexer) scanKeyword() (*Token, error) {
 		}
 
 		// if peek doesn't match the keyword, then skip
-		if strings.ToUpper(string(peek)) != keyword.String() {
+		if strings.ToUpper(string(peek)) != keyword {
 			continue
 		}
 
@@ -240,12 +244,7 @@ func (l *Lexer) scanKeyword() (*Token, error) {
 			if err != nil {
 				return nil, err
 			}
-			return &Token{
-				Type: keyword,
-				Raw:  raw,
-				Line: l.line,
-				Pos:  l.pos - len(raw),
-			}, nil
+			return l.newToken(typ, raw)
 		}
 
 	}
@@ -254,13 +253,6 @@ func (l *Lexer) scanKeyword() (*Token, error) {
 }
 
 func (l *Lexer) scanIdent() (t *Token, e error) {
-	// defer func() {
-	// 	if t != nil {
-	// 		fmt.Printf("scanIdent:%q\n", t.Raw)
-	// 	} else {
-	// 		fmt.Printf("scanIdent:%v\n", e)
-	// 	}
-	// }()
 	var raw []byte
 
 	peek, err := l.peek()
@@ -305,12 +297,7 @@ func (l *Lexer) scanIdent() (t *Token, e error) {
 		if err := l.unread(); err != nil {
 			return nil, err
 		}
-		return &Token{
-			Type: IDENT,
-			Raw:  raw,
-			Line: l.line,
-			Pos:  l.pos - len(raw),
-		}, nil
+		return l.newToken(IDENT, raw)
 	}
 	raw = append(raw, '.')
 
@@ -320,12 +307,7 @@ func (l *Lexer) scanIdent() (t *Token, e error) {
 		return
 	}
 	raw = append(raw, suffix.Raw...)
-	return &Token{
-		Type: IDENT,
-		Raw:  raw,
-		Line: l.line,
-		Pos:  l.pos - len(raw),
-	}, nil
+	return l.newToken(IDENT, raw)
 }
 
 func (l *Lexer) scanQuote() ([]byte, error) {
@@ -377,34 +359,34 @@ func (l *Lexer) scanIllegal() (*Token, error) {
 		return nil, err
 	}
 
-	return &Token{
-		Type: ILLEGAL,
-		Raw:  []byte{ch},
-		Line: l.line,
-		Pos:  l.pos - 1,
-	}, nil
+	return l.newToken(ILLEGAL, []byte{ch})
 }
 
 // read reads the next byte from the buffered reader.
 // Returns the byte(0) if an error occurs (or io.EOF is returned).
-func (l *Lexer) read() (byte, error) {
+func (l *Lexer) read() (b byte, e error) {
 	if l.eof {
 		return eof, nil
 	}
+
+	defer func() {
+		if b == eof || e != nil {
+			return
+		}
+		l.loc[len(l.loc)-1]++
+		if b == '\n' {
+			l.loc = append(l.loc, 1)
+		}
+		// fmt.Println(string(b), jsonify(l.loc))
+	}()
+
 	ch, err := l.r.ReadByte()
 	if err == io.EOF {
 		l.eof = true
-		l.pos++
 		return eof, nil
 	}
 	if err != nil {
 		return eof, err
-	}
-	if ch == '\n' {
-		l.line++
-		l.pos = 1
-	} else {
-		l.pos++
 	}
 	return ch, nil
 }
@@ -474,7 +456,10 @@ func (l *Lexer) unread() error {
 	if err := l.r.UnreadByte(); err != nil {
 		return err
 	}
-	l.pos--
+	if l.loc[len(l.loc)-1] <= 1 {
+		l.loc = l.loc[:len(l.loc)-1]
+	}
+	l.loc[len(l.loc)-1]--
 	return nil
 }
 
@@ -511,18 +496,18 @@ func isIdent(ch byte) bool {
 	return isLetter(ch) || isDigit(ch) || in(ch, '_')
 }
 
-func isSymbol(str string) bool {
+func isSymbol(pattern string) bool {
 	for _, symbol := range symbols {
-		if strings.ToUpper(str) == symbol.String() {
+		if strings.ToUpper(pattern) == symbol {
 			return true
 		}
 	}
 	return false
 }
 
-func isKeyword(str string) bool {
+func isKeyword(pattern string) bool {
 	for _, keyword := range keywords {
-		if strings.ToUpper(str) == keyword.String() {
+		if strings.ToUpper(pattern) == keyword {
 			return true
 		}
 	}
@@ -530,74 +515,74 @@ func isKeyword(str string) bool {
 }
 
 var (
-	symbols = []TokenType{
-		ASTERISK,
-		COMMA,
-		// DOT,
-		LPAREN,
-		RPAREN,
-		LBRACKET,
-		RBRACKET,
-		EQ,
-		NEQ,
-		LT,
-		LTE,
-		GT,
-		GTE,
-		PLUS,
-		MINUS,
-		SLASH,
-		PERCENT,
-		SEMICOLON,
+	symbols = map[TokenType]string{
+		STAR:      "*",
+		COMMA:     ",",
+		DOT:       ".",
+		LPAREN:    "(",
+		RPAREN:    ")",
+		LBRACKET:  "[",
+		RBRACKET:  "]",
+		EQ:        "=",
+		NEQ:       "!=",
+		LT:        "<",
+		LTE:       "<=",
+		GT:        ">",
+		GTE:       "<=",
+		PLUS:      "+",
+		MINUS:     "-",
+		SLASH:     "/",
+		PERCENT:   "%",
+		SEMICOLON: ";",
 	}
 
-	keywords = []TokenType{
-		SELECT,
-		DISTINCT,
-		COUNT,
-		SUM,
-		MAX,
-		MIN,
-		AVG,
-		AS,
-		FROM,
-		CROSS_JOIN,
-		INNER_JOIN,
-		LEFT_JOIN,
-		LEFT_OUTER_JOIN,
-		RIGHT_JOIN,
-		RIGHT_OUTER_JOIN,
-		FULL_OUTER_JOIN,
-		ON,
-		WHERE,
-		AND,
-		OR,
-		NOT,
-		IN,
-		IS,
-		BETWEEN,
-		WITHIN,
-		GROUP_BY,
-		EVERY,
-		LIMIT,
-		NULL,
-		TRUE,
-		FALSE,
+	keywords = map[TokenType]string{
+		SELECT:   SELECT.String(),
+		DISTINCT: DISTINCT.String(),
+		COUNT:    COUNT.String(),
+		SUM:      SUM.String(),
+		MAX:      MAX.String(),
+		MIN:      MIN.String(),
+		AVG:      AVG.String(),
+		AS:       AS.String(),
+		FROM:     FROM.String(),
+		CROSS:    CROSS.String(),
+		INNER:    INNER.String(),
+		LEFT:     LEFT.String(),
+		RIGHT:    RIGHT.String(),
+		FULL:     FULL.String(),
+		OUTER:    OUTER.String(),
+		JOIN:     JOIN.String(),
+		ON:       ON.String(),
+		WHERE:    WHERE.String(),
+		AND:      AND.String(),
+		OR:       OR.String(),
+		NOT:      NOT.String(),
+		IN:       IN.String(),
+		IS:       IS.String(),
+		BETWEEN:  BETWEEN.String(),
+		WITHIN:   WITHIN.String(),
+		GROUP:    GROUP.String(),
+		BY:       BY.String(),
+		EVERY:    EVERY.String(),
+		LIMIT:    LIMIT.String(),
+		NULL:     NULL.String(),
+		TRUE:     TRUE.String(),
+		FALSE:    FALSE.String(),
+	}
+
+	escapeChars = map[byte]int{
+		'x':  2, // followed by exactly two hexadecimal digits
+		'u':  4, // followed by exactly four hexadecimal digits
+		'U':  8, // followed by exactly eight hexadecimal digits
+		'a':  0, // Alert or bell
+		'b':  0, // Backspace
+		'\\': 0, // Backslash
+		't':  0, // Horizontal tab
+		'n':  0, // Line feed or newline
+		'f':  0, // Form feed
+		'r':  0, // Carriage return
+		'v':  0, // Veritical tab
+		// \' and \" must be handled specially within the context of single or double quoted strings
 	}
 )
-
-// map of escape characters to number of bytes in the escape sequence
-var escapeChars = map[byte]int{
-	'x':  2, // followed by exactly two hexadecimal digits
-	'u':  4, // followed by exactly four hexadecimal digits
-	'U':  8, // followed by exactly eight hexadecimal digits
-	'a':  0, // Alert or bell
-	'b':  0, // Backspace
-	'\\': 0, // Backslash
-	't':  0, // Horizontal tab
-	'n':  0, // Line feed or newline
-	'f':  0, // Form feed
-	'r':  0, // Carriage return
-	'v':  0, // Veritical tab
-	// \' and \" must be handled specially within the context of single or double quoted strings
-}

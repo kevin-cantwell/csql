@@ -219,7 +219,7 @@ func (p *Parser) parseSelectColumn() (*SelectColumn, error) {
 	// * | expression
 	var col *SelectColumn
 	switch t.Type {
-	case ASTERISK:
+	case STAR:
 		return &SelectColumn{
 			Star: true,
 		}, nil
@@ -261,7 +261,7 @@ func (p *Parser) parseSelectStarColumn() (*SelectColumn, error) {
 
 	}
 
-	if t.Type != ASTERISK {
+	if t.Type != STAR {
 		return nil, errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
 	}
 
@@ -299,7 +299,7 @@ func (p *Parser) parseSelectExpressionColumn() (*SelectColumn, error) {
 // 			return nil, err
 // 		}
 // 		switch t.Type {
-// 		case NUMERIC, STRING, IDENT, COUNT, SUM, AVG, MIN, MAX, PLUS, MINUS, ASTERISK, SLASH, PERCENT, LPAREN, RPAREN:
+// 		case NUMERIC, STRING, IDENT, COUNT, SUM, AVG, MIN, MAX, PLUS, MINUS, STAR, SLASH, PERCENT, LPAREN, RPAREN:
 // 			tokens = append(tokens, t)
 // 		default:
 // 			return tokens, nil
@@ -327,7 +327,7 @@ func (p *Parser) parseSelectExpressionColumn() (*SelectColumn, error) {
 // 		}
 // 		tokens = append(tokens, t)
 // 		switch t.Type {
-// 		case PLUS, MINUS, ASTERISK, SLASH, PERCENT:
+// 		case PLUS, MINUS, STAR, SLASH, PERCENT:
 // 			next, err := p.scanInfixExpression()
 // 			if err != nil {
 // 				return nil, err
@@ -409,16 +409,16 @@ func (p *Parser) parseSelectExpressionColumn() (*SelectColumn, error) {
 // 			if !tokenIn(prev, ILLEGAL, PLUS, MINUS, NUMERIC, STRING, IDENT, LPAREN, RPAREN) {
 // 				return nil, errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
 // 			}
-// 		case ASTERISK, SLASH:
+// 		case STAR, SLASH:
 // 			if !tokenIn(prev, NUMERIC, STRING, IDENT, RPAREN) {
 // 				return nil, errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
 // 			}
 // 		case NUMERIC, STRING, COUNT, SUM, MIN, MAX, AVG:
-// 			if !tokenIn(prev, ILLEGAL, PLUS, MINUS, ASTERISK, SLASH, LPAREN) {
+// 			if !tokenIn(prev, ILLEGAL, PLUS, MINUS, STAR, SLASH, LPAREN) {
 // 				return nil, errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
 // 			}
 // 		case IDENT:
-// 			if !tokenIn(prev, ILLEGAL, PLUS, MINUS, ASTERISK, SLASH, LPAREN) {
+// 			if !tokenIn(prev, ILLEGAL, PLUS, MINUS, STAR, SLASH, LPAREN) {
 // 				return nil, errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
 // 			}
 // 			dot, err := p.scan()
@@ -438,7 +438,7 @@ func (p *Parser) parseSelectExpressionColumn() (*SelectColumn, error) {
 // 			}
 // 			term = append(term, dot, ident)
 // 		case LPAREN:
-// 			if !tokenIn(prev, ILLEGAL, PLUS, MINUS, ASTERISK, SLASH, COUNT, SUM, AVG, MIN, MAX, LPAREN) {
+// 			if !tokenIn(prev, ILLEGAL, PLUS, MINUS, STAR, SLASH, COUNT, SUM, AVG, MIN, MAX, LPAREN) {
 // 				return nil, errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
 // 			}
 
@@ -566,12 +566,12 @@ func (p *Parser) parseTablesExpression() (*TablesExpression, error) {
 			return nil, err
 		}
 		tables.CrossJoin = join
-	case CROSS_JOIN:
-		join, err := p.parseTablesExpression()
-		if err != nil {
-			return nil, err
-		}
-		tables.CrossJoin = join
+	// case CROSS_JOIN:
+	// 	join, err := p.parseTablesExpression()
+	// 	if err != nil {
+	// 		return nil, err
+	// 	}
+	// 	tables.CrossJoin = join
 	default:
 		p.unscan()
 	}

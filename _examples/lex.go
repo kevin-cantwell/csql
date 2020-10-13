@@ -13,7 +13,7 @@ func main() {
 	log.SetFlags(log.Lshortfile)
 
 	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{"Token", "Raw"})
+	table.SetHeader([]string{"Token", "Raw", "Line", "Pos"})
 
 	lex := csql.NewLexer(os.Stdin)
 
@@ -23,6 +23,12 @@ func main() {
 			if err != nil {
 				panic(err)
 			}
+			table.Append([]string{
+				tok.Type.String(),
+				fmt.Sprintf("%q", tok.Raw),
+				fmt.Sprintf("%d", tok.Line),
+				fmt.Sprintf("%d", tok.Pos),
+			})
 			if tok.Type == csql.EOF {
 				table.Render() // Send output
 				table.ClearRows()
@@ -33,7 +39,6 @@ func main() {
 				table.ClearRows()
 				continue
 			}
-			table.Append([]string{tok.Type.String(), fmt.Sprintf("%q", tok.Raw)})
 		}
 	}
 
