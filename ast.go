@@ -97,7 +97,7 @@ type FromClause struct {
 }
 
 type TablesExpression struct {
-	Table         *string           `json:"table,omitempty"`
+	Ident         Token             `json:"table"`
 	Expr          *TablesExpression `json:"expr,omitempty"`
 	As            string            `json:"as,omitempty"`
 	CrossJoin     *TablesExpression `json:"CROSS JOIN,omitempty"`

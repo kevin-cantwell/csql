@@ -242,42 +242,28 @@ func (p *Parser) parseSelectColumn() (*SelectColumn, error) {
 	}
 
 	// IDENT
-	t, err = p.scanSkipWS()
+	alias, err := p.parseAlias()
 	if err != nil {
 		return nil, err
 	}
-	if t.Type != IDENT {
-		return nil, errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
-	}
-	col.As = unquote(t.Raw)
+	col.As = alias
 
 	return col, nil
 }
 
-func (p *Parser) parseSelectStarColumn() (*SelectColumn, error) {
+func (p *Parser) parseAlias() (string, error) {
 	t, err := p.scanSkipWS()
 	if err != nil {
-		return nil, err
-
+		return "", err
 	}
-
-	if t.Type != STAR {
-		return nil, errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
+	if t.Type != IDENT {
+		return "", errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
 	}
-
-	t, err = p.scanSkipWS()
-	if err != nil {
-		return nil, err
+	ident := splitIdent(t.Raw)
+	if len(ident) > 1 {
+		return "", errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
 	}
-	p.unscan()
-
-	if t.Type != COMMA && t.Type != FROM {
-		return nil, errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
-	}
-
-	return &SelectColumn{
-		Star: true,
-	}, nil
+	return ident[0], nil
 }
 
 func (p *Parser) parseSelectExpressionColumn() (*SelectColumn, error) {
@@ -523,8 +509,7 @@ func (p *Parser) parseTablesExpression() (*TablesExpression, error) {
 		}
 		tables.Expr = inner
 	case IDENT:
-		table := unquote(t.Raw)
-		tables.Table = &table
+		tables.Ident = *t
 	default:
 		return nil, errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
 	}
@@ -536,16 +521,18 @@ func (p *Parser) parseTablesExpression() (*TablesExpression, error) {
 	}
 	switch t.Type {
 	case AS:
-		alias, err := p.scanSkipWS()
+		alias, err := p.parseAlias()
 		if err != nil {
 			return nil, err
 		}
-		if alias.Type != IDENT && alias.Type != STRING {
-			return nil, errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
+		tables.As = alias
+	case IDENT:
+		p.unscan()
+		alias, err := p.parseAlias()
+		if err != nil {
+			return nil, err
 		}
-		tables.As = unquote(alias.Raw)
-	case IDENT, STRING:
-		tables.As = unquote(t.Raw)
+		tables.As = alias
 	default:
 		p.unscan()
 	}
@@ -566,7 +553,7 @@ func (p *Parser) parseTablesExpression() (*TablesExpression, error) {
 			return nil, err
 		}
 		tables.CrossJoin = join
-	// case CROSS_JOIN:
+	// case CROSS:
 	// 	join, err := p.parseTablesExpression()
 	// 	if err != nil {
 	// 		return nil, err
@@ -576,27 +563,6 @@ func (p *Parser) parseTablesExpression() (*TablesExpression, error) {
 		p.unscan()
 	}
 	// TODO: Other join cases
-
-	// AS
-	t, err = p.scanSkipWS()
-	if err != nil {
-		return nil, err
-	}
-	switch t.Type {
-	case AS:
-		alias, err := p.scanSkipWS()
-		if err != nil {
-			return nil, err
-		}
-		if alias.Type != IDENT && alias.Type != STRING {
-			return nil, errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
-		}
-		tables.As = unquote(alias.Raw)
-	case IDENT, STRING:
-		tables.As = unquote(t.Raw)
-	default:
-		p.unscan()
-	}
 
 	// ON
 	t, err = p.scanSkipWS()
@@ -650,9 +616,63 @@ func tokenIn(tok TokenType, in ...TokenType) bool {
 	return false
 }
 
-func unquote(orig []byte) string {
+// splits an dot-deliminated identifier
+func splitIdent(raw []byte) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+
+	var split []string
+
+loop:
+	for i := 0; i < len(raw); i++ {
+		switch raw[i] {
+		case '"':
+			curr := []byte{'"'}
+			i++
+			for ; i < len(raw); i++ {
+				ch := raw[i]
+				switch ch {
+				case '\\':
+					curr = append(curr, ch)
+					escape := raw[i+1]
+					curr = append(curr, escape)
+				case '"':
+					curr = append(curr, '"')
+					split = append(split, mustUnquote(curr))
+					i++ // skip past the next dot
+					continue loop
+				default:
+					curr = append(curr, ch)
+				}
+			}
+		default:
+			var curr []byte
+			for ; i < len(raw); i++ {
+				ch := raw[i]
+				if ch == '.' {
+					break
+				}
+				curr = append(curr, ch)
+			}
+			split = append(split, string(curr))
+		}
+	}
+
+	return split
+}
+
+func mustUnquote(orig []byte) string {
+	uq, err := unquote(orig)
+	if err != nil {
+		panic(errors.Errorf("%q: %+v", orig, err))
+	}
+	return uq
+}
+
+func unquote(orig []byte) (string, error) {
 	if len(orig) == 0 {
-		return ""
+		return "", nil
 	}
 
 	quote := orig[0]
@@ -660,9 +680,9 @@ func unquote(orig []byte) string {
 	case '"':
 		uq, err := strconv.Unquote(string(orig))
 		if err != nil {
-			panic(errors.Errorf("%q: %+v", orig, err))
+			return "", err
 		}
-		return uq
+		return uq, nil
 	case '\'':
 		// convert single quotes to double quotes and try again
 		dq := []byte{'"'}
@@ -685,6 +705,6 @@ func unquote(orig []byte) string {
 		}
 		return unquote(dq)
 	default:
-		return string(orig)
+		return string(orig), nil
 	}
 }
