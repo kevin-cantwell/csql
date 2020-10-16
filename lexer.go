@@ -5,6 +5,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/pkg/errors"
@@ -38,8 +39,10 @@ func NewLexer(r io.Reader) *Lexer {
 func (l *Lexer) Scan() (*Token, error) {
 	for _, scan := range []func() (*Token, error){
 		l.scanEOF,
+		l.scanComment,
 		l.scanWS,
 		l.scanString,
+		l.scanDuration,
 		l.scanNumeric,
 		l.scanSymbol,
 		l.scanKeyword,
@@ -105,6 +108,30 @@ func (l *Lexer) scanEOF() (*Token, error) {
 	return l.newToken(EOF, nil)
 }
 
+func (l *Lexer) scanComment() (*Token, error) {
+	peek, err := l.peekN(2)
+	if err != nil {
+		return nil, err
+	}
+	if string(peek) != "--" {
+		return nil, nil
+	}
+	var raw []byte
+	for {
+		ch, err := l.read()
+		if err != nil {
+			return nil, err
+		}
+		switch ch {
+		case '\n', eof:
+			l.unread()
+			return l.newToken(COMMENT, raw)
+		default:
+			raw = append(raw, ch)
+		}
+	}
+}
+
 func (l *Lexer) scanWS() (*Token, error) {
 	ch, err := l.read()
 	if err != nil {
@@ -160,38 +187,144 @@ func (l *Lexer) scanString() (*Token, error) {
 	}
 }
 
-// scans a number literal
-func (l *Lexer) scanNumeric() (*Token, error) {
-	peek, err := l.peek()
-	if err != nil {
-		return nil, err
-	}
-
-	// fail fast
-	if peek != '-' && peek != '.' && !isDigit(peek) {
-		return nil, nil
-	}
-
+// A duration string is a possibly signed sequence of decimal numbers, each with optional fraction
+// and a unit suffix, such as "300ms", "-1.5h" or "2h45m". Valid time units are "ns", "us" (or "µs"),
+// "ms", "s", "m", "h".
+func (l *Lexer) scanDuration() (*Token, error) {
 	var (
-		peeked []byte
+		duration []byte
 	)
 
+	// "ns", "us", "µs", "ms", "s", "m", "h"
+	appendUnit := func() (bool, error) {
+		peek, err := l.peekAfter(len(duration))
+		if err != nil {
+			return false, err
+		}
+		switch peek {
+		case 's', 'h':
+			duration = append(duration, peek)
+			return true, nil
+		case 'n', 'u', 'µ':
+			duration = append(duration, peek)
+			peek, err := l.peekAfter(len(duration))
+			if err != nil {
+				return false, err
+			}
+			if peek != 's' {
+				return false, nil
+			}
+			duration = append(duration, 's')
+			return true, nil
+		case 'm':
+			duration = append(duration, peek)
+			peek, err := l.peekAfter(len(duration))
+			if err != nil {
+				return false, err
+			}
+			if peek != 's' {
+				return true, nil
+			}
+			duration = append(duration, 's')
+			return true, nil
+		default:
+			return false, nil
+		}
+	}
+
+	appendDuration := func() (bool, error) {
+		var (
+			decimal  bool
+			numerals int
+		)
+		for {
+			peek, err := l.peekAfter(len(duration))
+			if err != nil {
+				return false, err
+			}
+			switch {
+			case peek == '-':
+				if len(duration) > 0 {
+					return false, nil
+				}
+			case peek == '.':
+				if decimal {
+					return false, nil
+				}
+				decimal = true
+			case isDigit(peek):
+				numerals++
+			case !isDigit(peek):
+				if numerals == 0 {
+					return false, nil
+				}
+				return appendUnit()
+			}
+			duration = append(duration, peek)
+		}
+	}
+
 	for i := 0; ; i++ {
-		peek, err := l.peekAfter(i)
+		ok, err := appendDuration()
 		if err != nil {
 			return nil, err
 		}
-		if peek != '-' && peek != '.' && !isDigit(peek) {
-			break
+		if !ok {
+			if i == 0 {
+				return nil, nil
+			}
+			if _, err := time.ParseDuration(string(duration)); err != nil {
+				return nil, nil
+			}
+			raw, err := l.readN(len(duration))
+			if err != nil {
+				return nil, err
+			}
+			return l.newToken(DURATION, raw)
 		}
-		peeked = append(peeked, peek)
+	}
+}
+
+// scans a number literal
+func (l *Lexer) scanNumeric() (*Token, error) {
+	var (
+		number   []byte
+		decimal  bool
+		numerals int
+	)
+
+loop:
+	for {
+		peek, err := l.peekAfter(len(number))
+		if err != nil {
+			return nil, err
+		}
+		switch {
+		case peek == '-':
+			if len(number) > 0 {
+				break loop
+			}
+		case peek == '.':
+			if decimal {
+				break loop
+			}
+			decimal = true
+		case isDigit(peek):
+			numerals++
+		case !isDigit(peek):
+			if numerals == 0 {
+				return nil, nil
+			}
+			break loop
+		}
+		number = append(number, peek)
 	}
 
-	if _, err := strconv.ParseFloat(string(peeked), 64); err != nil {
+	if _, err := strconv.ParseFloat(string(number), 64); err != nil {
 		return nil, nil
 	}
 
-	raw, err := l.readN(len(peeked))
+	raw, err := l.readN(len(number))
 	if err != nil {
 		return nil, err
 	}
@@ -546,14 +679,7 @@ var (
 		AVG:      AVG.String(),
 		AS:       AS.String(),
 		FROM:     FROM.String(),
-		CROSS:    CROSS.String(),
-		INNER:    INNER.String(),
-		LEFT:     LEFT.String(),
-		RIGHT:    RIGHT.String(),
-		FULL:     FULL.String(),
-		OUTER:    OUTER.String(),
-		JOIN:     JOIN.String(),
-		ON:       ON.String(),
+		OVER:     OVER.String(),
 		WHERE:    WHERE.String(),
 		AND:      AND.String(),
 		OR:       OR.String(),

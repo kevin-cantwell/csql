@@ -93,26 +93,12 @@ func (e *ComparisonExpression) at() (Token, Token) {
 }
 
 type FromClause struct {
-	Tables TablesExpression `json:"tables"`
+	Tables []Table `json:"tables"`
 }
 
-type TablesExpression struct {
-	Ident         Token             `json:"table"`
-	Expr          *TablesExpression `json:"expr,omitempty"`
-	As            string            `json:"as,omitempty"`
-	CrossJoin     *TablesExpression `json:"CROSS JOIN,omitempty"`
-	InnerJoin     *TablesExpression `json:"INNER JOIN,omitempty"`
-	OuterJoin     *TablesExpression `json:"OUTER JOIN,omitempty"`
-	LeftJoin      *TablesExpression `json:"LEFT JOIN,omitempty"`
-	RightJoin     *TablesExpression `json:"RIGHT JOIN,omitempty"`
-	FullOuterJoin *TablesExpression `json:"FULL OUTER JOIN,omitempty"`
-	On            Predicate         `json:"ON,omitempty"`
-}
-
-type JoinOnPredicate struct {
-	Op    Token      `json:"op"`
-	Left  Expression `json:"left"`
-	Right Expression `json:"right"`
+type Table struct {
+	Name string `json:"name"`
+	As   string `json:"as"`
 }
 
 type Predicate interface {

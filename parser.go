@@ -232,38 +232,13 @@ func (p *Parser) parseSelectColumn() (*SelectColumn, error) {
 	}
 
 	// AS
-	t, err = p.scanSkipWS()
-	if err != nil {
-		return nil, err
-	}
-	if t.Type != AS {
-		p.unscan()
-		return col, nil
-	}
-
-	// IDENT
-	alias, err := p.parseAlias()
+	alias, err := p.parseAs()
 	if err != nil {
 		return nil, err
 	}
 	col.As = alias
 
 	return col, nil
-}
-
-func (p *Parser) parseAlias() (string, error) {
-	t, err := p.scanSkipWS()
-	if err != nil {
-		return "", err
-	}
-	if t.Type != IDENT {
-		return "", errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
-	}
-	ident := splitIdent(t.Raw)
-	if len(ident) > 1 {
-		return "", errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
-	}
-	return ident[0], nil
 }
 
 func (p *Parser) parseSelectExpressionColumn() (*SelectColumn, error) {
@@ -276,184 +251,6 @@ func (p *Parser) parseSelectExpressionColumn() (*SelectColumn, error) {
 		Expr: expr,
 	}, nil
 }
-
-// func (p *Parser) scanExpression() ([]*Token, error) {
-// 	var tokens []*Token
-// 	for {
-// 		t, err := p.scanSkipWS()
-// 		if err != nil {
-// 			return nil, err
-// 		}
-// 		switch t.Type {
-// 		case NUMERIC, STRING, IDENT, COUNT, SUM, AVG, MIN, MAX, PLUS, MINUS, STAR, SLASH, PERCENT, LPAREN, RPAREN:
-// 			tokens = append(tokens, t)
-// 		default:
-// 			return tokens, nil
-// 		}
-// 	}
-// }
-
-// func (p *Parser) scanInfixExpression() ([]*Token, error) {
-// 	var tokens []*Token
-// 	var (
-// 		compare bool
-// 	)
-// 	t, err := p.scanSkipWS()
-// 	if err != nil {
-// 		return nil, err
-// 	}
-
-// 	tokens = append(tokens, t)
-
-// 	switch t.Type {
-// 	case NUMERIC:
-// 		t, err := p.scanSkipWS()
-// 		if err != nil {
-// 			return nil, err
-// 		}
-// 		tokens = append(tokens, t)
-// 		switch t.Type {
-// 		case PLUS, MINUS, STAR, SLASH, PERCENT:
-// 			next, err := p.scanInfixExpression()
-// 			if err != nil {
-// 				return nil, err
-// 			}
-// 			tokens = append(tokens, next...)
-// 		}
-// 	case STRING:
-// 		t, err := p.scanSkipWS()
-// 		if err != nil {
-// 			return nil, err
-// 		}
-// 		tokens = append(tokens, t)
-// 		switch t.Type {
-// 		case PLUS:
-// 			next, err := p.scanInfixExpression()
-// 			if err != nil {
-// 				return nil, err
-// 			}
-// 			tokens = append(tokens, next...)
-// 		}
-// 	case IDENT:
-// 		panic("todo: IDENT[.IDENT]")
-// 	case COUNT:
-// 		panic("todo: COUNT([ALL | DISTINCT] expression)")
-// 	case SUM, AVG, MIN, MAX:
-// 		lparen, err := p.scanSkipWS()
-// 		if err != nil {
-// 			return nil, err
-// 		}
-// 		if lparen.Type != LPAREN {
-// 			return nil, errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
-// 		}
-// 		p.unscan()
-// 		next, err := p.scanInfixExpression()
-// 		if err != nil {
-// 			return nil, err
-// 		}
-// 		tokens = append(tokens, next...)
-// 	case LPAREN:
-// 		inner, err := p.scanInfixExpression()
-// 		if err != nil {
-// 			return nil, err
-// 		}
-// 		rparen, err := p.scanSkipWS()
-// 		if err != nil {
-// 			return nil, err
-// 		}
-// 		if rparen.Type != RPAREN {
-// 			return nil, errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
-// 		}
-// 		tokens = append(tokens, inner...)
-// 		tokens = append(tokens, rparen)
-// 	}
-
-// 	return tokens, nil
-// }
-
-// func (p *Parser) scanInfixTerms() ([]exprTerm, error) {
-
-// 	// operands and operators
-// 	var expr []exprTerm
-// 	var prev TokenType = ILLEGAL
-
-// 	for {
-// 		// last Token in the last exprTerm
-// 		if len(expr) > 0 {
-// 			prev = expr[len(expr)-1].typ()
-// 		}
-
-// 		t, err := p.scanSkipWS()
-// 		if err != nil {
-// 			return nil, err
-// 		}
-
-// 		term := exprTerm{t}
-
-// 		switch t.Type {
-// 		case PLUS, MINUS:
-// 			if !tokenIn(prev, ILLEGAL, PLUS, MINUS, NUMERIC, STRING, IDENT, LPAREN, RPAREN) {
-// 				return nil, errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
-// 			}
-// 		case STAR, SLASH:
-// 			if !tokenIn(prev, NUMERIC, STRING, IDENT, RPAREN) {
-// 				return nil, errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
-// 			}
-// 		case NUMERIC, STRING, COUNT, SUM, MIN, MAX, AVG:
-// 			if !tokenIn(prev, ILLEGAL, PLUS, MINUS, STAR, SLASH, LPAREN) {
-// 				return nil, errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
-// 			}
-// 		case IDENT:
-// 			if !tokenIn(prev, ILLEGAL, PLUS, MINUS, STAR, SLASH, LPAREN) {
-// 				return nil, errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
-// 			}
-// 			dot, err := p.scan()
-// 			if err != nil {
-// 				return nil, err
-// 			}
-// 			if dot.Type != DOT {
-// 				p.unscan()
-// 				break
-// 			}
-// 			ident, err := p.scan()
-// 			if err != nil {
-// 				return nil, err
-// 			}
-// 			if ident.Type != IDENT {
-// 				return nil, errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
-// 			}
-// 			term = append(term, dot, ident)
-// 		case LPAREN:
-// 			if !tokenIn(prev, ILLEGAL, PLUS, MINUS, STAR, SLASH, COUNT, SUM, AVG, MIN, MAX, LPAREN) {
-// 				return nil, errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
-// 			}
-
-// 			expr = append(expr, term)
-
-// 			// recursively descend into the parenthetical
-// 			inner, err := p.scanInfixTerms()
-// 			if err != nil {
-// 				return nil, err
-// 			}
-// 			expr = append(expr, inner...)
-
-// 			rparen, err := p.scan()
-// 			if err != nil {
-// 				return nil, err
-// 			}
-// 			if rparen.Type != RPAREN {
-// 				return nil, errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
-// 			}
-
-// 			term = exprTerm{rparen}
-// 		default:
-// 			p.unscan()
-// 			return expr, nil
-// 		}
-
-// 		expr = append(expr, term)
-// 	}
-// }
 
 func (p *Parser) scanComparisonOp() (*Token, error) {
 	t, err := p.scanSkipWS()
@@ -477,120 +274,94 @@ func (p *Parser) parseFrom() (*FromClause, error) {
 		return nil, errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
 	}
 
-	tables, err := p.parseTablesExpression()
+	// IDENT [AS] IDENT [, IDENT [AS] IDENT]...
+	table, err := p.parseTable()
 	if err != nil {
 		return nil, err
 	}
-	from.Tables = *tables
+	from.Tables = append(from.Tables, *table)
 
-	return &from, nil
+	for {
+		t, err := p.scanSkipWS()
+		if err != nil {
+			return nil, err
+		}
+		switch t.Type {
+		case COMMA:
+			continue
+		case IDENT:
+			p.unscan()
+			table, err := p.parseTable()
+			if err != nil {
+				return nil, err
+			}
+			from.Tables = append(from.Tables, *table)
+		default:
+			return &from, nil
+		}
+	}
 }
 
-func (p *Parser) parseTablesExpression() (*TablesExpression, error) {
-	tables := &TablesExpression{}
-
-	// IDENT | LPAREN
+func (p *Parser) parseTable() (*Table, error) {
 	t, err := p.scanSkipWS()
 	if err != nil {
 		return nil, err
 	}
-	switch t.Type {
-	case LPAREN:
-		inner, err := p.parseTablesExpression()
-		if err != nil {
-			return nil, err
-		}
-		t, err = p.scanSkipWS()
-		if err != nil {
-			return nil, err
-		}
-		if t.Type != RPAREN {
-			return nil, errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
-		}
-		tables.Expr = inner
-	case IDENT:
-		tables.Ident = *t
-	default:
+	if t.Type != IDENT {
 		return nil, errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
 	}
-
-	// AS
-	t, err = p.scanSkipWS()
+	ident := splitIdent(t.Raw)
+	if len(ident) > 1 {
+		return nil, errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
+	}
+	as, err := p.parseAs()
 	if err != nil {
 		return nil, err
+	}
+	return &Table{
+		Name: ident[0],
+		As:   as,
+	}, nil
+}
+
+func (p *Parser) parseAs() (string, error) {
+	t, err := p.scanSkipWS()
+	if err != nil {
+		return "", err
 	}
 	switch t.Type {
 	case AS:
 		alias, err := p.parseAlias()
 		if err != nil {
-			return nil, err
+			return "", err
 		}
-		tables.As = alias
+		return alias, nil
 	case IDENT:
 		p.unscan()
 		alias, err := p.parseAlias()
 		if err != nil {
-			return nil, err
+			return "", err
 		}
-		tables.As = alias
+		return alias, nil
 	default:
 		p.unscan()
 	}
-
-	// JOIN expression
-	t, err = p.scanSkipWS()
-	if err != nil {
-		return nil, err
-	}
-
-	switch t.Type {
-	case LPAREN:
-		p.unscan()
-		return p.parseTablesExpression()
-	case COMMA:
-		join, err := p.parseTablesExpression()
-		if err != nil {
-			return nil, err
-		}
-		tables.CrossJoin = join
-	// case CROSS:
-	// 	join, err := p.parseTablesExpression()
-	// 	if err != nil {
-	// 		return nil, err
-	// 	}
-	// 	tables.CrossJoin = join
-	default:
-		p.unscan()
-	}
-	// TODO: Other join cases
-
-	// ON
-	t, err = p.scanSkipWS()
-	if err != nil {
-		return nil, err
-	}
-	switch t.Type {
-	case ON:
-		on, err := p.parseJoinOnPredicate()
-		if err != nil {
-			return nil, err
-		}
-		// tables.On
-		panic(on)
-	default:
-		p.unscan()
-	}
-
-	return tables, nil
+	return "", nil
 }
 
-func (p *Parser) parseJoinOnPredicate() (*JoinOnPredicate, error) {
-	left, err := (&ExpressionParser{}).Parse(p)
+func (p *Parser) parseAlias() (string, error) {
+	t, err := p.scanSkipWS()
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-
-	panic(left)
+	if t.Type != IDENT {
+		return "", errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
+	}
+	ident := splitIdent(t.Raw)
+	if len(ident) > 1 {
+		return "", errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
+	}
+	return ident[0], nil
 }
 
 func (p *Parser) scanSkipWSAssertNext(expected TokenType, varargs ...TokenType) error {

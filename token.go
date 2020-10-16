@@ -43,6 +43,7 @@ const (
 	// Special tokens
 	ILLEGAL TokenType = iota
 	EOF
+	COMMENT
 	WS
 
 	// Symbols
@@ -75,14 +76,7 @@ const (
 	AVG
 	AS
 	FROM
-	CROSS
-	INNER
-	LEFT
-	RIGHT
-	FULL
-	OUTER
-	JOIN
-	ON
+	OVER
 	WHERE
 	AND
 	OR
@@ -100,12 +94,10 @@ const (
 	FALSE
 
 	// Literals
-	STRING  // 'foo', "foo"
-	NUMERIC // 123.456
+	STRING   // 'foo', "foo"
+	NUMERIC  // 123.456
+	DURATION // 2m, 1s, 24h
 
 	// Identifiers
 	IDENT // table_name, field_name, alias, "ident"
-
-	// Comment
-	COMMENT
 )
