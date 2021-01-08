@@ -1,16 +1,27 @@
-package csql
+package ast
+
+import "time"
+
+type Source int
 
 type Statement struct {
-	Select *SelectStatement `json:"SELECT,omitempty"`
+	SQL     string
+	Every   time.Duration
+	Consume Token // SELF|EDGE|TREE
 }
 
-type SelectStatement struct {
-	Distinct bool           `json:"DISTINCT,omitempty"`
-	Cols     []SelectColumn `json:"columns,omitempty"`
-	From     *FromClause    `json:"FROM,omitempty"`
+type Select struct {
+	Distinct bool          `json:"DISTINCT,omitempty"`
+	Cols     []Column      `json:"columns,omitempty"`
+	From     *FromClause   `json:"FROM,omitempty"`
+	Where    *WhereClause  `json:"WHERE,omitempty"`
+	Every    time.Duration `json:"EVERY,omitempty"`
 }
 
-type SelectColumn struct {
+type Insert struct {
+}
+
+type Column struct {
 	// if true, other fields ignored
 	Star bool       `json:"star,omitempty"`
 	Expr Expression `json:"expression,omitempty"`
@@ -93,25 +104,29 @@ func (e *ComparisonExpression) at() (Token, Token) {
 }
 
 type FromClause struct {
-	Tables []Table `json:"tables"`
+	Tables []TableIdent  `json:"tables"`
+	Within time.Duration `json:"over"`
 }
 
-type Table struct {
+type TableIdent struct {
 	Name string `json:"name"`
 	As   string `json:"as"`
 }
 
-type Predicate interface {
-	predicate()
+type WhereClause struct {
 }
 
-type FunctionPredicate struct {
-	Op   Token // NOT, IN, BETWEEN, IS
-	Args []Expression
-}
+// type Predicate interface {
+// 	predicate()
+// }
 
-type AndPredicate struct {
-	Op    Token `json:"op"`
-	Left  Predicate
-	Right Predicate
-}
+// type FunctionPredicate struct {
+// 	Op   Token // NOT, IN, BETWEEN, IS
+// 	Args []Expression
+// }
+
+// type AndPredicate struct {
+// 	Op    Token `json:"op"`
+// 	Left  Predicate
+// 	Right Predicate
+// }

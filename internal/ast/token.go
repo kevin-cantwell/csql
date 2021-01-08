@@ -1,4 +1,4 @@
-package csql
+package ast
 
 import (
 	"fmt"
@@ -87,16 +87,20 @@ const (
 	WITHIN
 	GROUP
 	BY
-	EVERY
 	LIMIT
 	NULL
-	TRUE
-	FALSE
+	EVERY
+	CONSUME
+	SELF
+	EDGE
+	TREE
 
 	// Literals
 	STRING   // 'foo', "foo"
 	NUMERIC  // 123.456
 	DURATION // 2m, 1s, 24h
+	TRUE     // true|TRUE
+	FALSE    // false|FALSE
 
 	// Identifiers
 	IDENT // table_name, field_name, alias, "ident"
