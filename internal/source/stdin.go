@@ -1,8 +1,8 @@
 package source
 
 import (
-	"bufio"
 	"encoding/json"
+	"fmt"
 	"os"
 )
 
@@ -40,16 +40,12 @@ func (s *StdinSource) Close() error {
 
 func (s *StdinSource) read() {
 	defer close(s.ch)
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
+	dec := json.NewDecoder(os.Stdin)
+	for dec.More() {
 		var rec Record
-		if err := json.Unmarshal(line, &rec); err != nil {
-			continue // skip malformed lines
+		if err := dec.Decode(&rec); err != nil {
+			fmt.Fprintf(os.Stderr, "csql: stdin: %v\n", err)
+			return
 		}
 		select {
 		case s.ch <- rec:

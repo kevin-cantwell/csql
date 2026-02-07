@@ -248,7 +248,18 @@ func insertRecord(db *sql.DB, table string, rec source.Record) error {
 
 	for k, v := range rec {
 		cols = append(cols, quoteIdent(k))
-		vals = append(vals, v)
+		// Serialize nested objects/arrays to JSON strings for SQLite
+		switch v.(type) {
+		case map[string]interface{}, []interface{}:
+			b, err := json.Marshal(v)
+			if err != nil {
+				vals = append(vals, fmt.Sprintf("%v", v))
+			} else {
+				vals = append(vals, string(b))
+			}
+		default:
+			vals = append(vals, v)
+		}
 		placeholders = append(placeholders, "?")
 	}
 
