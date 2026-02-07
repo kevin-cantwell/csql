@@ -1,504 +1,405 @@
 package ast
 
-// import (
-// 	"fmt"
-// 	"io"
-// 	"path/filepath"
-// 	"runtime"
-// 	"strconv"
-// 	"time"
+import (
+	"fmt"
+	"io"
+	"strconv"
+	"time"
+)
 
-// 	"github.com/pkg/errors"
-// )
+// Parser is a recursive descent SQL parser.
+type Parser struct {
+	lex       *Lexer
+	scanned   []*Token
+	unscanned []*Token
+}
 
-// func line() string {
-// 	_, file, l, _ := runtime.Caller(1)
-// 	file = filepath.Base(file)
-// 	return fmt.Sprintf("%s:%d", file, l)
-// }
+// NewParser returns a new Parser that reads from r.
+func NewParser(r io.Reader) *Parser {
+	return &Parser{lex: NewLexer(r)}
+}
 
-// type Parser struct {
-// 	lex       *Lexer
-// 	pos       int
-// 	scanned   []*Token
-// 	unscanned []*Token
-// }
+// Parse parses the input into a list of statements.
+func (p *Parser) Parse() ([]Statement, error) {
+	var stmts []Statement
 
-// func NewParser(r io.Reader) *Parser {
-// 	return &Parser{lex: NewLexer(r)}
-// }
+	for {
+		t, err := p.scanSkipWS()
+		if err != nil {
+			return nil, err
+		}
 
-// func (p *Parser) Parse() ([]Statement, error) {
-// 	var stmts []Statement
+		switch t.Type {
+		case SEMICOLON:
+			continue
+		case EOF:
+			return stmts, nil
+		case SELECT:
+			p.unscan()
+			sel, err := p.parseSelect()
+			if err != nil {
+				return nil, err
+			}
+			stmts = append(stmts, Statement{Select: sel})
+		default:
+			return nil, fmt.Errorf("unexpected token %q at line %d position %d", t.String(), t.Line, t.Pos)
+		}
+	}
+}
 
-// 	for {
-// 		var stmt Statement
-// 		t, err := p.scanSkipWS()
-// 		if err != nil {
-// 			return nil, err
-// 		}
+func (p *Parser) scan() (*Token, error) {
+	if len(p.unscanned) > 0 {
+		t := p.unscanned[len(p.unscanned)-1]
+		p.unscanned = p.unscanned[:len(p.unscanned)-1]
+		p.scanned = append(p.scanned, t)
+		return t, nil
+	}
+	t, err := p.lex.Scan()
+	if err != nil {
+		return nil, err
+	}
+	p.scanned = append(p.scanned, t)
+	return t, nil
+}
 
-// 		switch t.Type {
-// 		case SEMICOLON:
-// 			continue
-// 		case EOF:
-// 			return stmts, nil
-// 		case SELECT:
-// 			p.unscan()
-// 			s, err := p.parseSelect()
-// 			if err != nil {
-// 				return nil, err
-// 			}
-// 			stmt.Select = s
-// 		default:
-// 			return nil, errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
-// 		}
+func (p *Parser) scanSkipWS() (*Token, error) {
+	for {
+		t, err := p.scan()
+		if err != nil {
+			return nil, err
+		}
+		if t.Type != WS && t.Type != COMMENT {
+			return t, nil
+		}
+	}
+}
 
-// 		stmts = append(stmts, stmt)
-// 	}
-// }
+func (p *Parser) unscan() {
+	if len(p.scanned) == 0 {
+		return
+	}
+	t := p.scanned[len(p.scanned)-1]
+	p.scanned = p.scanned[:len(p.scanned)-1]
+	p.unscanned = append(p.unscanned, t)
+}
 
-// func (p *Parser) scan() (*Token, error) {
-// 	var t *Token
-// 	if len(p.unscanned) > 0 {
-// 		t = p.unscanned[len(p.unscanned)-1]
-// 		p.unscanned = p.unscanned[:len(p.unscanned)-1]
-// 	} else {
-// 		tok, err := p.lex.Scan()
-// 		if err != nil {
-// 			return nil, err
-// 		}
-// 		t = tok
-// 	}
-// 	p.scanned = append(p.scanned, t)
-// 	p.pos += len(t.Raw)
-// 	return t, nil
-// }
+// peek returns the next non-WS token without consuming it.
+func (p *Parser) peek() (*Token, error) {
+	t, err := p.scanSkipWS()
+	if err != nil {
+		return &Token{Type: ILLEGAL}, err
+	}
+	// Put the token back into unscanned directly
+	p.unscanned = append(p.unscanned, t)
+	// Remove it from scanned (it's the last element since scanSkipWS just added it)
+	if len(p.scanned) > 0 {
+		p.scanned = p.scanned[:len(p.scanned)-1]
+	}
+	return t, nil
+}
 
-// func (p *Parser) scanSkipWS() (*Token, error) {
-// 	for {
-// 		t, err := p.scan()
-// 		if err != nil {
-// 			return nil, err
-// 		}
-// 		if t.Type != WS {
-// 			return t, nil
-// 		}
-// 	}
-// }
+func (p *Parser) expect(typ TokenType) (*Token, error) {
+	t, err := p.scanSkipWS()
+	if err != nil {
+		return nil, err
+	}
+	if t.Type != typ {
+		return nil, fmt.Errorf("expected %s but got %q at line %d position %d", typ, t.String(), t.Line, t.Pos)
+	}
+	return t, nil
+}
 
-// func (p *Parser) unscan() {
-// 	if len(p.scanned) == 0 {
-// 		return
-// 	}
-// 	t := p.scanned[len(p.scanned)-1]
-// 	p.scanned = p.scanned[:len(p.scanned)-1]
-// 	p.unscanned = append(p.unscanned, t)
-// 	p.pos -= len(t.Raw)
-// }
+func (p *Parser) parseSelect() (*SelectStatement, error) {
+	stmt := &SelectStatement{}
 
-// func (p *Parser) unscanSkipWS() {
-// 	for {
-// 		p.unscan()
-// 		if len(p.scanned) == 0 {
-// 			return
-// 		}
-// 		if p.scanned[len(p.scanned)-1].Type != WS {
-// 			return
-// 		}
-// 	}
-// }
+	if _, err := p.expect(SELECT); err != nil {
+		return nil, err
+	}
 
-// func (p *Parser) parseSelect() (*Select, error) {
-// 	stmt := &Select{}
+	// DISTINCT
+	if t, _ := p.peek(); t.Type == DISTINCT {
+		p.scanSkipWS()
+		stmt.Distinct = true
+	}
 
-// 	t, err := p.scanSkipWS()
-// 	if err != nil {
-// 		return nil, err
-// 	}
+	// columns
+	cols, err := p.parseColumns()
+	if err != nil {
+		return nil, err
+	}
+	stmt.Columns = cols
 
-// 	// SELECT
-// 	if t.Type != SELECT {
-// 		return nil, errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
-// 	}
+	// FROM
+	if t, _ := p.peek(); t.Type != FROM {
+		return stmt, nil
+	}
+	p.scanSkipWS() // consume FROM
 
-// 	if !p.hasMore() {
-// 		return stmt, nil
-// 	}
+	from, err := p.parseTableRef()
+	if err != nil {
+		return nil, err
+	}
+	stmt.From = &FromClause{Table: *from}
 
-// 	t, err = p.scanSkipWS()
-// 	if err != nil {
-// 		return nil, err
-// 	}
+	// JOINs
+	for {
+		t, err := p.peek()
+		if err != nil {
+			return nil, err
+		}
 
-// 	// DISTINCT
-// 	if t.Type == DISTINCT {
-// 		stmt.Distinct = true
-// 	} else {
-// 		p.unscan()
-// 		if !p.hasMore() {
-// 			return stmt, nil
-// 		}
-// 	}
+		var joinType JoinType
+		switch t.Type {
+		case JOIN:
+			p.scanSkipWS()
+			joinType = InnerJoin
+		case LEFT:
+			p.scanSkipWS()
+			joinType = LeftJoin
+			if _, err := p.expect(JOIN); err != nil {
+				return nil, err
+			}
+		case RIGHT:
+			p.scanSkipWS()
+			joinType = RightJoin
+			if _, err := p.expect(JOIN); err != nil {
+				return nil, err
+			}
+		default:
+			goto afterJoins
+		}
 
-// 	// column, column, ...
-// 	cols, err := p.parseColumns()
-// 	if err != nil {
-// 		return nil, err
-// 	}
-// 	stmt.Cols = cols
+		jt, err := p.parseTableRef()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(ON); err != nil {
+			return nil, err
+		}
+		cond, err := p.parseExpression()
+		if err != nil {
+			return nil, err
+		}
+		stmt.Joins = append(stmt.Joins, JoinClause{
+			Type:      joinType,
+			Table:     *jt,
+			Condition: cond,
+		})
+	}
+afterJoins:
 
-// 	if !p.hasMore() {
-// 		return stmt, nil
-// 	}
+	// WHERE
+	if t, _ := p.peek(); t.Type == WHERE {
+		p.scanSkipWS()
+		where, err := p.parseExpression()
+		if err != nil {
+			return nil, err
+		}
+		stmt.Where = where
+	}
 
-// 	// FROM table [, table...]
-// 	from, err := p.parseFrom()
-// 	if err != nil {
-// 		return nil, err
-// 	}
-// 	stmt.From = from
+	// GROUP BY
+	if t, _ := p.peek(); t.Type == GROUP {
+		p.scanSkipWS()
+		if _, err := p.expect(BY); err != nil {
+			return nil, err
+		}
+		exprs, err := p.parseExpressionList()
+		if err != nil {
+			return nil, err
+		}
+		stmt.GroupBy = exprs
+	}
 
-// 	// TODO: FROM, WHERE, GROUP BY, LIMIT, WHEN
-// 	// from, err := p.parseFrom()
-// 	// if err != nil {
-// 	// 	return nil, err
-// 	// }
-// 	// stmt.From = from
+	// ORDER BY
+	if t, _ := p.peek(); t.Type == ORDER {
+		p.scanSkipWS()
+		if _, err := p.expect(BY); err != nil {
+			return nil, err
+		}
+		orderBy, err := p.parseOrderBy()
+		if err != nil {
+			return nil, err
+		}
+		stmt.OrderBy = orderBy
+	}
 
-// 	for {
-// 		t, err := p.scanSkipWS()
-// 		if err != nil {
-// 			return nil, err
-// 		}
-// 		switch t.Type {
-// 		case EOF, SEMICOLON:
-// 			return stmt, nil
-// 		default:
-// 			return nil, errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
-// 		}
-// 	}
-// }
+	// OVER duration
+	if t, _ := p.peek(); t.Type == OVER {
+		p.scanSkipWS()
+		durTok, err := p.expect(DURATION)
+		if err != nil {
+			return nil, err
+		}
+		d, err := time.ParseDuration(durTok.String())
+		if err != nil {
+			return nil, fmt.Errorf("invalid duration %q at line %d position %d", durTok.String(), durTok.Line, durTok.Pos)
+		}
+		stmt.Over = d
+	}
 
-// func (p *Parser) hasMore() bool {
-// 	t, err := p.scanSkipWS()
-// 	if err != nil {
-// 		panic(err)
-// 	}
-// 	p.unscan()
-// 	return t.Type != EOF && t.Type != SEMICOLON
-// }
+	// EVERY duration
+	if t, _ := p.peek(); t.Type == EVERY {
+		p.scanSkipWS()
+		durTok, err := p.expect(DURATION)
+		if err != nil {
+			return nil, err
+		}
+		d, err := time.ParseDuration(durTok.String())
+		if err != nil {
+			return nil, fmt.Errorf("invalid duration %q at line %d position %d", durTok.String(), durTok.Line, durTok.Pos)
+		}
+		stmt.Every = d
+	}
 
-// func (p *Parser) parseColumns() ([]Column, error) {
-// 	var cols []Column
+	// LIMIT n
+	if t, _ := p.peek(); t.Type == LIMIT {
+		p.scanSkipWS()
+		numTok, err := p.expect(NUMERIC)
+		if err != nil {
+			return nil, err
+		}
+		n, err := strconv.Atoi(numTok.String())
+		if err != nil {
+			return nil, fmt.Errorf("invalid LIMIT value %q at line %d position %d", numTok.String(), numTok.Line, numTok.Pos)
+		}
+		stmt.Limit = &n
+	}
 
-// 	for {
-// 		col, err := p.parseColumn()
-// 		if err != nil {
-// 			return nil, err
-// 		}
-// 		cols = append(cols, *col)
+	return stmt, nil
+}
 
-// 		t, err := p.scanSkipWS()
-// 		if err != nil {
-// 			return nil, err
-// 		}
+func (p *Parser) parseColumns() ([]Column, error) {
+	var cols []Column
 
-// 		if t.Type != COMMA {
-// 			p.unscan()
-// 			return cols, nil
-// 		}
-// 	}
-// }
+	for {
+		col, err := p.parseColumn()
+		if err != nil {
+			return nil, err
+		}
+		cols = append(cols, *col)
 
-// func (p *Parser) parseColumn() (*Column, error) {
-// 	t, err := p.scanSkipWS()
-// 	if err != nil {
-// 		return nil, err
-// 	}
+		if t, _ := p.peek(); t.Type != COMMA {
+			return cols, nil
+		}
+		p.scanSkipWS() // consume comma
+	}
+}
 
-// 	// * | expression
-// 	var col *Column
-// 	switch t.Type {
-// 	case STAR:
-// 		return &Column{
-// 			Star: true,
-// 		}, nil
-// 	default:
-// 		p.unscan()
-// 		col, err = p.parseSelectExpressionColumn()
-// 		if err != nil {
-// 			return nil, err
-// 		}
-// 	}
+func (p *Parser) parseColumn() (*Column, error) {
+	// Use peek to avoid scan/unscan WS issues
+	t, err := p.peek()
+	if err != nil {
+		return nil, err
+	}
 
-// 	// AS
-// 	alias, err := p.parseAs()
-// 	if err != nil {
-// 		return nil, err
-// 	}
-// 	col.As = alias
+	// Check for bare *
+	if t.Type == STAR {
+		p.scanSkipWS() // consume the star
+		return &Column{Star: true}, nil
+	}
 
-// 	return col, nil
-// }
+	// Parse as expression (handles ident, ident.col, functions, etc.)
+	expr, err := p.parseExpression()
+	if err != nil {
+		return nil, err
+	}
 
-// func (p *Parser) parseSelectExpressionColumn() (*Column, error) {
-// 	expr, err := (&ExpressionParser{}).Parse(p)
-// 	if err != nil {
-// 		return nil, err
-// 	}
+	// Check if the expression is "table.*" via the ColumnRef with Column="*"
+	if ref, ok := expr.(*ColumnRef); ok && ref.Column == "*" {
+		return &Column{Star: true, TableRef: ref.Table}, nil
+	}
 
-// 	return &Column{
-// 		Expr: expr,
-// 	}, nil
-// }
+	col := &Column{Expr: expr}
 
-// func (p *Parser) scanComparisonOp() (*Token, error) {
-// 	t, err := p.scanSkipWS()
-// 	if err != nil {
-// 		return nil, err
-// 	}
-// 	switch t.Type {
-// 	// case
-// 	}
-// 	panic("todo")
-// }
+	// Optional AS alias
+	t, err = p.peek()
+	if err != nil {
+		return nil, err
+	}
+	if t.Type == AS {
+		p.scanSkipWS() // consume AS
+		alias, err := p.expect(IDENT)
+		if err != nil {
+			return nil, err
+		}
+		col.Alias = alias.String()
+	} else if t.Type == IDENT {
+		// implicit alias (no AS keyword) — but only if it's not a keyword
+		p.scanSkipWS()
+		col.Alias = t.String()
+	}
 
-// func (p *Parser) parseFrom() (*FromClause, error) {
-// 	var from FromClause
+	return col, nil
+}
 
-// 	t, err := p.scanSkipWS()
-// 	if err != nil {
-// 		return nil, err
-// 	}
-// 	if t.Type != FROM {
-// 		return nil, errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
-// 	}
+func (p *Parser) parseTableRef() (*TableRef, error) {
+	name, err := p.expect(IDENT)
+	if err != nil {
+		return nil, err
+	}
 
-// 	// IDENT [AS] IDENT [, IDENT [AS] IDENT]...
-// 	table, err := p.parseTable()
-// 	if err != nil {
-// 		return nil, err
-// 	}
-// 	from.Tables = append(from.Tables, *table)
+	ref := &TableRef{Name: name.String()}
 
-// 	for {
-// 		table, err := p.parseTable()
-// 		if err != nil {
-// 			return nil, err
-// 		}
-// 		from.Tables = append(from.Tables, *table)
+	// Optional alias
+	t, err := p.peek()
+	if err != nil {
+		return nil, err
+	}
+	if t.Type == AS {
+		p.scanSkipWS() // consume AS
+		alias, err := p.expect(IDENT)
+		if err != nil {
+			return nil, err
+		}
+		ref.Alias = alias.String()
+	} else if t.Type == IDENT {
+		p.scanSkipWS() // consume the alias
+		ref.Alias = t.String()
+	}
+	// Otherwise, no alias — token stays for the next clause
 
-// 		t, err := p.scanSkipWS()
-// 		if err != nil {
-// 			return nil, err
-// 		}
-// 		if t.Type != COMMA {
-// 			break
-// 		}
-// 	}
+	return ref, nil
+}
 
-// 	over, err := p.parseOver()
-// 	if err != nil {
-// 		return nil, err
-// 	}
-// 	from.Over = over
+func (p *Parser) parseOrderBy() ([]OrderByExpr, error) {
+	var orders []OrderByExpr
 
-// 	return &from, nil
-// }
+	for {
+		expr, err := p.parseExpression()
+		if err != nil {
+			return nil, err
+		}
 
-// func (p *Parser) parseTable() (*TableIdent, error) {
-// 	t, err := p.scanSkipWS()
-// 	if err != nil {
-// 		return nil, err
-// 	}
-// 	if t.Type != IDENT {
-// 		return nil, errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
-// 	}
-// 	ident := splitIdent(t.Raw)
-// 	if len(ident) > 1 {
-// 		return nil, errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
-// 	}
-// 	as, err := p.parseAs()
-// 	if err != nil {
-// 		return nil, err
-// 	}
-// 	return &TableIdent{
-// 		Name: ident[0],
-// 		As:   as,
-// 	}, nil
-// }
+		order := OrderByExpr{Expr: expr}
+		if t, _ := p.peek(); t.Type == ASC {
+			p.scanSkipWS()
+		} else if t.Type == DESC {
+			p.scanSkipWS()
+			order.Desc = true
+		}
+		orders = append(orders, order)
 
-// func (p *Parser) parseOver() (time.Duration, error) {
-// 	t, err := p.scanSkipWS()
-// 	if err != nil {
-// 		return 0, err
-// 	}
-// 	if t.Type != OVER {
-// 		return 0, errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
-// 	}
-// 	t, err = p.scanSkipWS()
-// 	if err != nil {
-// 		return 0, err
-// 	}
-// 	if t.Type != DURATION {
-// 		return 0, errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
-// 	}
-// 	return time.ParseDuration(t.String())
-// }
+		if t, _ := p.peek(); t.Type != COMMA {
+			return orders, nil
+		}
+		p.scanSkipWS() // consume comma
+	}
+}
 
-// func (p *Parser) parseAs() (string, error) {
-// 	t, err := p.scanSkipWS()
-// 	if err != nil {
-// 		return "", err
-// 	}
-// 	switch t.Type {
-// 	case AS:
-// 		alias, err := p.parseAlias()
-// 		if err != nil {
-// 			return "", err
-// 		}
-// 		return alias, nil
-// 	case IDENT:
-// 		p.unscan()
-// 		alias, err := p.parseAlias()
-// 		if err != nil {
-// 			return "", err
-// 		}
-// 		return alias, nil
-// 	default:
-// 		p.unscan()
-// 	}
-// 	return "", nil
-// }
+func (p *Parser) parseExpressionList() ([]Expression, error) {
+	var exprs []Expression
 
-// func (p *Parser) parseAlias() (string, error) {
-// 	t, err := p.scanSkipWS()
-// 	if err != nil {
-// 		return "", err
-// 	}
-// 	if t.Type != IDENT {
-// 		return "", errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
-// 	}
-// 	ident := splitIdent(t.Raw)
-// 	if len(ident) > 1 {
-// 		return "", errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
-// 	}
-// 	return ident[0], nil
-// }
+	for {
+		expr, err := p.parseExpression()
+		if err != nil {
+			return nil, err
+		}
+		exprs = append(exprs, expr)
 
-// func (p *Parser) scanSkipWSAssertNext(expected TokenType, varargs ...TokenType) error {
-// 	for _, expectedType := range append([]TokenType{expected}, varargs...) {
-// 		t, err := p.scanSkipWS()
-// 		if err != nil {
-// 			return err
-// 		}
-// 		if t.Type != expectedType {
-// 			return errors.Errorf("unexpected token %s at line %d position %d", t, t.Line, t.Pos)
-// 		}
-// 	}
-// 	return nil
-
-// }
-
-// func tokenIn(tok TokenType, in ...TokenType) bool {
-// 	for _, t := range in {
-// 		if tok == t {
-// 			return true
-// 		}
-// 	}
-// 	return false
-// }
-
-// // splits an dot-deliminated identifier
-// func splitIdent(raw []byte) []string {
-// 	if len(raw) == 0 {
-// 		return nil
-// 	}
-
-// 	var split []string
-
-// loop:
-// 	for i := 0; i < len(raw); i++ {
-// 		switch raw[i] {
-// 		case '"':
-// 			curr := []byte{'"'}
-// 			i++
-// 			for ; i < len(raw); i++ {
-// 				ch := raw[i]
-// 				switch ch {
-// 				case '\\':
-// 					curr = append(curr, ch)
-// 					escape := raw[i+1]
-// 					curr = append(curr, escape)
-// 				case '"':
-// 					curr = append(curr, '"')
-// 					split = append(split, mustUnquote(curr))
-// 					i++ // skip past the next dot
-// 					continue loop
-// 				default:
-// 					curr = append(curr, ch)
-// 				}
-// 			}
-// 		default:
-// 			var curr []byte
-// 			for ; i < len(raw); i++ {
-// 				ch := raw[i]
-// 				if ch == '.' {
-// 					break
-// 				}
-// 				curr = append(curr, ch)
-// 			}
-// 			split = append(split, string(curr))
-// 		}
-// 	}
-
-// 	return split
-// }
-
-// func mustUnquote(orig []byte) string {
-// 	uq, err := unquote(orig)
-// 	if err != nil {
-// 		panic(errors.Errorf("%q: %+v", orig, err))
-// 	}
-// 	return uq
-// }
-
-// func unquote(orig []byte) (string, error) {
-// 	if len(orig) == 0 {
-// 		return "", nil
-// 	}
-
-// 	quote := orig[0]
-// 	switch quote {
-// 	case '"':
-// 		uq, err := strconv.Unquote(string(orig))
-// 		if err != nil {
-// 			return "", err
-// 		}
-// 		return uq, nil
-// 	case '\'':
-// 		// convert single quotes to double quotes and try again
-// 		dq := []byte{'"'}
-// 		for i := 1; i < len(orig); i++ {
-// 			ch := orig[i]
-// 			switch ch {
-// 			case '\\':
-// 				escape := orig[i+1]
-// 				if '\'' == escape {
-// 					dq = append(dq, '\'')
-// 					i++
-// 					continue
-// 				}
-// 				dq = append(dq, ch)
-// 			case '\'':
-// 				dq = append(dq, '"')
-// 			default:
-// 				dq = append(dq, ch)
-// 			}
-// 		}
-// 		return unquote(dq)
-// 	default:
-// 		return string(orig), nil
-// 	}
-// }
+		if t, _ := p.peek(); t.Type != COMMA {
+			return exprs, nil
+		}
+		p.scanSkipWS() // consume comma
+	}
+}

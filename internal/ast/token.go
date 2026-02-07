@@ -87,6 +87,9 @@ const (
 	WITHIN
 	GROUP
 	BY
+	ORDER
+	ASC
+	DESC
 	LIMIT
 	NULL
 	EVERY
@@ -94,6 +97,11 @@ const (
 	SELF
 	EDGE
 	TREE
+	JOIN
+	ON
+	LEFT
+	RIGHT
+	LIKE
 
 	// Literals
 	STRING   // 'foo', "foo"

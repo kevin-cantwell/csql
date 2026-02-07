@@ -2,13 +2,12 @@ package ast
 
 import (
 	"bufio"
+	"fmt"
 	"io"
 	"strconv"
 	"strings"
 	"time"
 	"unicode"
-
-	"github.com/pkg/errors"
 )
 
 // eof represents a marker byte for the end of the reader.
@@ -332,20 +331,20 @@ loop:
 }
 
 func (l *Lexer) scanSymbol() (*Token, error) {
-	for typ, symbol := range symbols {
-		n := len([]byte(symbol))
+	for _, sym := range symbols {
+		n := len([]byte(sym.str))
 
 		peek, err := l.peekN(n)
 		if err != nil {
 			return nil, err
 		}
 
-		if string(peek) == symbol {
+		if string(peek) == sym.str {
 			raw, err := l.readN(n)
 			if err != nil {
 				return nil, err
 			}
-			return l.newToken(typ, raw)
+			return l.newToken(sym.typ, raw)
 		}
 	}
 
@@ -371,7 +370,7 @@ func (l *Lexer) scanKeyword() (*Token, error) {
 		if err != nil {
 			return nil, err
 		}
-		if !isLetter(ch) {
+		if !isIdent(ch) {
 			// It's the keyword
 			raw, err := l.readN(n)
 			if err != nil {
@@ -432,13 +431,16 @@ func (l *Lexer) scanIdent() (t *Token, e error) {
 		}
 		return l.newToken(IDENT, raw)
 	}
-	raw = append(raw, '.')
 
 	suffix, err := l.scanIdent()
 	if suffix == nil {
-		e = err
-		return
+		// No valid ident after dot — put the dot back and return what we have
+		if err := l.unread(); err != nil {
+			return nil, err
+		}
+		return l.newToken(IDENT, raw)
 	}
+	raw = append(raw, '.')
 	raw = append(raw, suffix.Raw...)
 	return l.newToken(IDENT, raw)
 }
@@ -458,7 +460,7 @@ func (l *Lexer) scanQuote() ([]byte, error) {
 		}
 		switch ch {
 		case eof:
-			return nil, errors.Errorf("mismatched quote")
+			return nil, fmt.Errorf("mismatched quote")
 		case '\\':
 			escaped, err := l.read()
 			if err != nil {
@@ -470,7 +472,7 @@ func (l *Lexer) scanQuote() ([]byte, error) {
 			}
 			n, ok := escapeChars[escaped]
 			if !ok {
-				return nil, errors.Errorf("unkown escape sequence: '\\%s'", string(escaped))
+				return nil, fmt.Errorf("unkown escape sequence: '\\%s'", string(escaped))
 			}
 			seq, err := l.readN(n)
 			if err != nil {
@@ -630,8 +632,8 @@ func isIdent(ch byte) bool {
 }
 
 func isSymbol(pattern string) bool {
-	for _, symbol := range symbols {
-		if strings.ToUpper(pattern) == symbol {
+	for _, sym := range symbols {
+		if strings.ToUpper(pattern) == sym.str {
 			return true
 		}
 	}
@@ -647,54 +649,68 @@ func isKeyword(pattern string) bool {
 	return false
 }
 
+type symbolEntry struct {
+	typ TokenType
+	str string
+}
+
 var (
-	symbols = map[TokenType]string{
-		STAR:      "*",
-		COMMA:     ",",
-		DOT:       ".",
-		LPAREN:    "(",
-		RPAREN:    ")",
-		LBRACKET:  "[",
-		RBRACKET:  "]",
-		EQ:        "=",
-		NEQ:       "!=",
-		LT:        "<",
-		LTE:       "<=",
-		GT:        ">",
-		GTE:       "<=",
-		PLUS:      "+",
-		MINUS:     "-",
-		SLASH:     "/",
-		PERCENT:   "%",
-		SEMICOLON: ";",
+	// Ordered longest-first so multi-char symbols match before single-char prefixes.
+	symbols = []symbolEntry{
+		{NEQ, "!="},
+		{LTE, "<="},
+		{GTE, ">="},
+		{STAR, "*"},
+		{COMMA, ","},
+		{DOT, "."},
+		{LPAREN, "("},
+		{RPAREN, ")"},
+		{LBRACKET, "["},
+		{RBRACKET, "]"},
+		{EQ, "="},
+		{LT, "<"},
+		{GT, ">"},
+		{PLUS, "+"},
+		{MINUS, "-"},
+		{SLASH, "/"},
+		{PERCENT, "%"},
+		{SEMICOLON, ";"},
 	}
 
 	keywords = map[TokenType]string{
-		SELECT:   SELECT.String(),
-		DISTINCT: DISTINCT.String(),
-		COUNT:    COUNT.String(),
-		SUM:      SUM.String(),
-		MAX:      MAX.String(),
-		MIN:      MIN.String(),
-		AVG:      AVG.String(),
-		AS:       AS.String(),
-		FROM:     FROM.String(),
-		OVER:     OVER.String(),
-		WHERE:    WHERE.String(),
-		AND:      AND.String(),
-		OR:       OR.String(),
-		NOT:      NOT.String(),
-		IN:       IN.String(),
-		IS:       IS.String(),
-		BETWEEN:  BETWEEN.String(),
-		WITHIN:   WITHIN.String(),
-		GROUP:    GROUP.String(),
-		BY:       BY.String(),
-		EVERY:    EVERY.String(),
-		LIMIT:    LIMIT.String(),
-		NULL:     NULL.String(),
-		TRUE:     TRUE.String(),
-		FALSE:    FALSE.String(),
+		SELECT:   "SELECT",
+		DISTINCT: "DISTINCT",
+		COUNT:    "COUNT",
+		SUM:      "SUM",
+		MAX:      "MAX",
+		MIN:      "MIN",
+		AVG:      "AVG",
+		AS:       "AS",
+		FROM:     "FROM",
+		OVER:     "OVER",
+		WHERE:    "WHERE",
+		AND:      "AND",
+		OR:       "OR",
+		NOT:      "NOT",
+		IN:       "IN",
+		IS:       "IS",
+		BETWEEN:  "BETWEEN",
+		WITHIN:   "WITHIN",
+		GROUP:    "GROUP",
+		BY:       "BY",
+		ORDER:    "ORDER",
+		ASC:      "ASC",
+		DESC:     "DESC",
+		EVERY:    "EVERY",
+		LIMIT:    "LIMIT",
+		NULL:     "NULL",
+		TRUE:     "TRUE",
+		FALSE:    "FALSE",
+		JOIN:     "JOIN",
+		ON:       "ON",
+		LEFT:     "LEFT",
+		RIGHT:    "RIGHT",
+		LIKE:     "LIKE",
 	}
 
 	escapeChars = map[byte]int{
