@@ -1,0 +1,6 @@
+{"user_id":1,"action":"login","ts":"2024-01-01T10:00:00Z"}
+{"user_id":2,"action":"click","ts":"2024-01-01T10:01:00Z"}
+{"user_id":1,"action":"purchase","ts":"2024-01-01T10:02:00Z"}
+{"user_id":3,"action":"login","ts":"2024-01-01T10:03:00Z"}
+{"user_id":2,"action":"logout","ts":"2024-01-01T10:04:00Z"}
+{"user_id":5,"action":"login","ts":"2024-01-01T10:05:00Z"}

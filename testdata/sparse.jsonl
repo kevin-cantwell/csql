@@ -1,0 +1,4 @@
+{"id":1,"name":"full","value":100,"tag":"a"}
+{"id":2,"name":"partial","value":200}
+{"id":3,"value":300,"tag":"b"}
+{"id":4,"name":"nullish"}

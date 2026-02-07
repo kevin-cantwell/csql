@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kevin-cantwell/csql/internal/ast"
@@ -78,19 +79,49 @@ func (e *Engine) executeBatch(stmt *ast.SelectStatement) error {
 	return e.writeRows(rows)
 }
 
+// taggedRecord associates a record with its source table name.
+type taggedRecord struct {
+	table string
+	rec   source.Record
+}
+
+// mergeStreams fans-in multiple streaming source channels into one tagged channel.
+func mergeStreams(sources map[string]source.Source) (<-chan taggedRecord, error) {
+	merged := make(chan taggedRecord, 64)
+	var wg sync.WaitGroup
+	for name, src := range sources {
+		if src.Type() != source.Streaming {
+			continue
+		}
+		ch, err := src.Records()
+		if err != nil {
+			return nil, fmt.Errorf("source %s: %w", name, err)
+		}
+		wg.Add(1)
+		go func(name string, ch <-chan source.Record) {
+			defer wg.Done()
+			for rec := range ch {
+				merged <- taggedRecord{table: name, rec: rec}
+			}
+		}(name, ch)
+	}
+	go func() {
+		wg.Wait()
+		close(merged)
+	}()
+	return merged, nil
+}
+
 func (e *Engine) executeStreaming(stmt *ast.SelectStatement) error {
-	// Find the streaming source
-	var streamSrc source.Source
-	var streamName string
+	// Collect streaming sources
+	streamingSources := make(map[string]source.Source)
 	for name, src := range e.sources {
 		if src.Type() == source.Streaming {
-			streamSrc = src
-			streamName = name
-			break
+			streamingSources[name] = src
 		}
 	}
-	if streamSrc == nil {
-		return fmt.Errorf("OVER requires a streaming source (stdin)")
+	if len(streamingSources) == 0 {
+		return fmt.Errorf("OVER requires at least one streaming source")
 	}
 
 	// Create static DB and load static sources
@@ -123,28 +154,32 @@ func (e *Engine) executeStreaming(stmt *ast.SelectStatement) error {
 
 	sqlStr := ToSQL(stmt, e.staticTables)
 
-	ch, err := streamSrc.Records()
+	merged, err := mergeStreams(streamingSources)
 	if err != nil {
-		return fmt.Errorf("source %s: %w", streamName, err)
+		return err
 	}
 
 	if stmt.Every > 0 {
-		return e.streamWithEvery(wm, sqlStr, streamName, ch, stmt.Every)
+		return e.streamWithEvery(wm, sqlStr, merged, stmt.Every)
 	}
 
 	// Without EVERY: query after each insert
-	for rec := range ch {
+	for tr := range merged {
 		win, err := wm.Current()
 		if err != nil {
 			return fmt.Errorf("get window: %w", err)
 		}
 
-		if err := insertRecord(win.DB, streamName, rec); err != nil {
+		if err := insertRecord(win.DB, tr.table, tr.rec); err != nil {
 			return fmt.Errorf("insert: %w", err)
 		}
 
 		rows, err := win.DB.Query(sqlStr)
 		if err != nil {
+			// In multi-stream mode, some tables may not exist yet
+			if isNoSuchTableErr(err) {
+				continue
+			}
 			return fmt.Errorf("query: %w\nSQL: %s", err, sqlStr)
 		}
 		if err := e.writeRows(rows); err != nil {
@@ -157,15 +192,15 @@ func (e *Engine) executeStreaming(stmt *ast.SelectStatement) error {
 	return nil
 }
 
-func (e *Engine) streamWithEvery(wm *WindowManager, sqlStr, streamName string, ch <-chan source.Record, every time.Duration) error {
+func (e *Engine) streamWithEvery(wm *WindowManager, sqlStr string, merged <-chan taggedRecord, every time.Duration) error {
 	ticker := time.NewTicker(every)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case rec, ok := <-ch:
+		case tr, ok := <-merged:
 			if !ok {
-				// Stream ended, do final query
+				// All streams ended, do final query
 				win, err := wm.Current()
 				if err != nil {
 					return fmt.Errorf("get window: %w", err)
@@ -183,7 +218,7 @@ func (e *Engine) streamWithEvery(wm *WindowManager, sqlStr, streamName string, c
 			if err != nil {
 				return fmt.Errorf("get window: %w", err)
 			}
-			if err := insertRecord(win.DB, streamName, rec); err != nil {
+			if err := insertRecord(win.DB, tr.table, tr.rec); err != nil {
 				return fmt.Errorf("insert: %w", err)
 			}
 
@@ -309,4 +344,9 @@ func sqliteType(v interface{}) string {
 	default:
 		return "TEXT"
 	}
+}
+
+// isNoSuchTableErr returns true if the error is a SQLite "no such table" error.
+func isNoSuchTableErr(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "no such table")
 }
