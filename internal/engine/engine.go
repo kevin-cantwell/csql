@@ -46,6 +46,12 @@ func (e *Engine) Execute(stmt *ast.SelectStatement) error {
 	return e.executeBatch(stmt)
 }
 
+// attachable is the interface for sources that can be ATTACHed directly.
+type attachable interface {
+	DBPath() string
+	TableName() string
+}
+
 func (e *Engine) executeBatch(stmt *ast.SelectStatement) error {
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
@@ -53,8 +59,22 @@ func (e *Engine) executeBatch(stmt *ast.SelectStatement) error {
 	}
 	defer db.Close()
 
-	// Load all sources into the DB
+	// Check for SQLite sources that can be ATTACHed directly
+	attachSchemas := make(map[string]string) // source name → schema for SQL generation
 	for name, src := range e.sources {
+		if att, ok := src.(attachable); ok {
+			schema := "_src_" + name
+			_, err := db.Exec(fmt.Sprintf(
+				"ATTACH DATABASE %s AS %s",
+				quoteLiteral(att.DBPath()), quoteIdent(schema)))
+			if err != nil {
+				return fmt.Errorf("attach %s: %w", name, err)
+			}
+			attachSchemas[name] = schema
+			continue
+		}
+
+		// Load non-SQLite sources into the DB
 		ch, err := src.Records()
 		if err != nil {
 			return fmt.Errorf("source %s: %w", name, err)
@@ -66,8 +86,30 @@ func (e *Engine) executeBatch(stmt *ast.SelectStatement) error {
 		}
 	}
 
+	// Build plans for SQL generation with correct table names
+	var plans map[string]*BatchTablePlan
+	var tableSchemas map[string]string
+	if len(attachSchemas) > 0 {
+		plans = make(map[string]*BatchTablePlan)
+		tableSchemas = make(map[string]string)
+		for name, schema := range attachSchemas {
+			att := e.sources[name].(attachable)
+			plans[name] = &BatchTablePlan{
+				Access:   AccessAttached,
+				Schema:   schema,
+				SQLTable: att.TableName(),
+			}
+			tableSchemas[name] = schema
+		}
+	}
+
 	// Convert AST to SQL
-	sqlStr := ToSQL(stmt, nil) // no static table distinction in batch mode
+	var sqlStr string
+	if plans != nil {
+		sqlStr = ToSQLWithPlans(stmt, tableSchemas, plans)
+	} else {
+		sqlStr = ToSQL(stmt, nil)
+	}
 
 	// Execute
 	rows, err := db.Query(sqlStr)
@@ -81,6 +123,14 @@ func (e *Engine) executeBatch(stmt *ast.SelectStatement) error {
 	defer rows.Close()
 
 	return e.writeRows(rows)
+}
+
+// IndexedTable holds a Go-side hash map for on-demand insertion of batch rows.
+type IndexedTable struct {
+	name      string                           // table name in window DB
+	joinCol   string                           // column indexed on (in the batch table)
+	streamCol string                           // column to look up from streaming record
+	records   map[interface{}][]source.Record   // joinKey → matching batch records
 }
 
 // taggedRecord associates a record with its source table name.
@@ -128,35 +178,82 @@ func (e *Engine) executeStreaming(stmt *ast.SelectStatement) error {
 		return fmt.Errorf("OVER requires at least one streaming source")
 	}
 
-	// Create static DB and load static sources
-	var staticDB *sql.DB
-	if len(e.staticTables) > 0 {
-		var err error
-		staticDB, err = sql.Open("sqlite", "file:static?mode=memory&cache=shared")
-		if err != nil {
-			return fmt.Errorf("open static db: %w", err)
-		}
-		defer staticDB.Close()
+	// Analyze batch access patterns
+	batchPlan := AnalyzeBatchAccess(stmt, e.sources)
 
-		for name, src := range e.sources {
-			if src.Type() == source.Static {
-				ch, err := src.Records()
-				if err != nil {
-					return fmt.Errorf("source %s: %w", name, err)
+	// Process each batch source according to its plan
+	var staticDB *sql.DB
+	var attachments []AttachInfo
+	var indexedTables []*IndexedTable
+	staticTables := make(map[string]bool)
+
+	for name, plan := range batchPlan {
+		src := e.sources[name]
+		switch plan.Access {
+		case AccessAttached:
+			attachments = append(attachments, AttachInfo{
+				Schema: plan.Schema,
+				Path:   plan.AttachPath,
+			})
+
+		case AccessIndexed:
+			// Read all records into a Go hash map indexed on the join column
+			ch, err := src.Records()
+			if err != nil {
+				return fmt.Errorf("source %s: %w", name, err)
+			}
+			idx := &IndexedTable{
+				name:      name,
+				joinCol:   plan.JoinCol,
+				streamCol: plan.StreamCol,
+				records:   make(map[interface{}][]source.Record),
+			}
+			for rec := range ch {
+				key := normalizeKey(rec[plan.JoinCol])
+				if key != nil {
+					idx.records[key] = append(idx.records[key], rec)
 				}
-				for rec := range ch {
-					if err := insertRecord(staticDB, name, rec); err != nil {
-						return fmt.Errorf("insert into %s: %w", name, err)
-					}
+			}
+			indexedTables = append(indexedTables, idx)
+
+		case AccessFullScan:
+			// Pre-load into shared static DB
+			if staticDB == nil {
+				var err error
+				staticDB, err = sql.Open("sqlite", "file:static?mode=memory&cache=shared")
+				if err != nil {
+					return fmt.Errorf("open static db: %w", err)
+				}
+			}
+			staticTables[name] = true
+			ch, err := src.Records()
+			if err != nil {
+				if staticDB != nil {
+					staticDB.Close()
+				}
+				return fmt.Errorf("source %s: %w", name, err)
+			}
+			for rec := range ch {
+				if err := insertRecord(staticDB, name, rec); err != nil {
+					staticDB.Close()
+					return fmt.Errorf("insert into %s: %w", name, err)
 				}
 			}
 		}
 	}
 
-	wm := NewWindowManager(stmt.Over, e.staticTables, staticDB)
-	defer wm.Close()
+	if staticDB != nil {
+		defer staticDB.Close()
+	}
 
-	sqlStr := ToSQL(stmt, e.staticTables)
+	// Build table schemas for SQL generation
+	tableSchemas := BuildTableSchemas(batchPlan)
+
+	// Generate SQL
+	sqlStr := ToSQLWithPlans(stmt, tableSchemas, batchPlan)
+
+	wm := NewWindowManager(stmt.Over, staticTables, staticDB, attachments)
+	defer wm.Close()
 
 	merged, err := mergeStreams(streamingSources)
 	if err != nil {
@@ -164,7 +261,7 @@ func (e *Engine) executeStreaming(stmt *ast.SelectStatement) error {
 	}
 
 	if stmt.Every > 0 {
-		return e.streamWithEvery(wm, sqlStr, merged, stmt.Every)
+		return e.streamWithEvery(wm, sqlStr, merged, stmt.Every, indexedTables)
 	}
 
 	// Without EVERY: query after each insert
@@ -176,6 +273,23 @@ func (e *Engine) executeStreaming(stmt *ast.SelectStatement) error {
 
 		if err := insertRecord(win.DB, tr.table, tr.rec); err != nil {
 			return fmt.Errorf("insert: %w", err)
+		}
+
+		// Populate indexed batch tables on demand
+		for _, idx := range indexedTables {
+			key := normalizeKey(tr.rec[idx.streamCol])
+			if key == nil {
+				continue
+			}
+			if win.hasKey(idx.name, key) {
+				continue
+			}
+			for _, rec := range idx.records[key] {
+				if err := insertRecord(win.DB, idx.name, rec); err != nil {
+					return fmt.Errorf("insert indexed %s: %w", idx.name, err)
+				}
+			}
+			win.markKey(idx.name, key)
 		}
 
 		rows, err := win.DB.Query(sqlStr)
@@ -196,7 +310,7 @@ func (e *Engine) executeStreaming(stmt *ast.SelectStatement) error {
 	return nil
 }
 
-func (e *Engine) streamWithEvery(wm *WindowManager, sqlStr string, merged <-chan taggedRecord, every time.Duration) error {
+func (e *Engine) streamWithEvery(wm *WindowManager, sqlStr string, merged <-chan taggedRecord, every time.Duration, indexedTables []*IndexedTable) error {
 	ticker := time.NewTicker(every)
 	defer ticker.Stop()
 
@@ -224,6 +338,23 @@ func (e *Engine) streamWithEvery(wm *WindowManager, sqlStr string, merged <-chan
 			}
 			if err := insertRecord(win.DB, tr.table, tr.rec); err != nil {
 				return fmt.Errorf("insert: %w", err)
+			}
+
+			// Populate indexed batch tables on demand
+			for _, idx := range indexedTables {
+				key := normalizeKey(tr.rec[idx.streamCol])
+				if key == nil {
+					continue
+				}
+				if win.hasKey(idx.name, key) {
+					continue
+				}
+				for _, rec := range idx.records[key] {
+					if err := insertRecord(win.DB, idx.name, rec); err != nil {
+						return fmt.Errorf("insert indexed %s: %w", idx.name, err)
+					}
+				}
+				win.markKey(idx.name, key)
 			}
 
 		case <-ticker.C:
@@ -353,4 +484,20 @@ func sqliteType(v interface{}) string {
 // isNoSuchTableErr returns true if the error is a SQLite "no such table" error.
 func isNoSuchTableErr(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "no such table")
+}
+
+// normalizeKey converts numeric values to float64 so that int64(1) and float64(1)
+// hash to the same map key. This is needed because CSV sources produce int64 while
+// JSON/streaming sources produce float64 for the same logical value.
+func normalizeKey(v interface{}) interface{} {
+	switch n := v.(type) {
+	case int:
+		return float64(n)
+	case int64:
+		return float64(n)
+	case float32:
+		return float64(n)
+	default:
+		return v
+	}
 }

@@ -9,11 +9,43 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// AttachInfo describes a SQLite database file to ATTACH to each window.
+type AttachInfo struct {
+	Schema string // e.g., "_src_users"
+	Path   string // file path to ATTACH
+}
+
 // Window is a time-partitioned SQLite database.
 type Window struct {
-	DB    *sql.DB
-	Start time.Time
-	End   time.Time
+	DB           *sql.DB
+	Start        time.Time
+	End          time.Time
+	insertedKeys map[string]map[interface{}]bool // table → set of inserted join keys
+}
+
+// hasKey returns true if the given key has already been inserted for the given table.
+func (w *Window) hasKey(table string, key interface{}) bool {
+	if w.insertedKeys == nil {
+		return false
+	}
+	keys, ok := w.insertedKeys[table]
+	if !ok {
+		return false
+	}
+	return keys[key]
+}
+
+// markKey records that a key has been inserted for the given table.
+func (w *Window) markKey(table string, key interface{}) {
+	if w.insertedKeys == nil {
+		w.insertedKeys = make(map[string]map[interface{}]bool)
+	}
+	keys, ok := w.insertedKeys[table]
+	if !ok {
+		keys = make(map[interface{}]bool)
+		w.insertedKeys[table] = keys
+	}
+	keys[key] = true
 }
 
 // WindowManager manages tumbling time windows.
@@ -21,16 +53,18 @@ type WindowManager struct {
 	duration     time.Duration
 	staticTables map[string]bool
 	staticDB     *sql.DB
+	attachments  []AttachInfo
 	mu           sync.Mutex
 	windows      []*Window
 }
 
 // NewWindowManager creates a new window manager.
-func NewWindowManager(duration time.Duration, staticTables map[string]bool, staticDB *sql.DB) *WindowManager {
+func NewWindowManager(duration time.Duration, staticTables map[string]bool, staticDB *sql.DB, attachments []AttachInfo) *WindowManager {
 	return &WindowManager{
 		duration:     duration,
 		staticTables: staticTables,
 		staticDB:     staticDB,
+		attachments:  attachments,
 	}
 }
 
@@ -80,6 +114,17 @@ func (wm *WindowManager) createWindow(start time.Time) (*Window, error) {
 		if err != nil {
 			db.Close()
 			return nil, fmt.Errorf("attach static db: %w", err)
+		}
+	}
+
+	// Attach SQLite source databases
+	for _, att := range wm.attachments {
+		_, err = db.Exec(fmt.Sprintf(
+			"ATTACH DATABASE %s AS %s",
+			quoteLiteral(att.Path), quoteIdent(att.Schema)))
+		if err != nil {
+			db.Close()
+			return nil, fmt.Errorf("attach %s: %w", att.Schema, err)
 		}
 	}
 

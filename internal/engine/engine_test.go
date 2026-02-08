@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -1852,6 +1853,437 @@ func TestBatchUnaryMinus(t *testing.T) {
 	rows := parseAndExec(t, "SELECT x FROM nums WHERE x > -1 ORDER BY x", src)
 	if len(rows) != 2 {
 		t.Fatalf("expected 2 rows, got %d", len(rows))
+	}
+}
+
+// ================================
+// LAZY BATCH ACCESS PATTERNS
+// ================================
+
+func TestAccessPatternSQLiteAttachStreaming(t *testing.T) {
+	// Verify SQLite source is ATTACHed (not pre-loaded) in streaming mode.
+	// Uses a large-ish SQLite DB; if it were pre-loaded, all rows would be copied.
+	// Instead, ATTACH allows SQLite to handle the lookup natively.
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "big.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Exec(`CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
+	tx, _ := db.Begin()
+	for i := 1; i <= 500; i++ {
+		tx.Exec(`INSERT INTO users VALUES (?, ?)`, i, fmt.Sprintf("user_%d", i))
+	}
+	tx.Commit()
+	db.Close()
+
+	users, err := source.NewSQLiteSource("users", dbPath, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stream, feed := newStreamChan("events")
+	go func() {
+		feed <- source.Record{"user_id": float64(1), "action": "login"}
+		feed <- source.Record{"user_id": float64(42), "action": "click"}
+		feed <- source.Record{"user_id": float64(500), "action": "logout"}
+		close(feed)
+	}()
+
+	sel := parseQuery(t, "SELECT u.name, e.action FROM events e JOIN users u ON e.user_id = u.id OVER 1h")
+	var buf bytes.Buffer
+	eng := New(&buf)
+	eng.AddSource(stream)
+	eng.AddSource(users)
+
+	if err := eng.Execute(sel); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	rows := parseOutput(t, buf.String())
+	// After 3 inserts: 1 + 2 + 3 = 6 output rows
+	if len(rows) != 6 {
+		t.Fatalf("expected 6 output rows, got %d", len(rows))
+	}
+
+	// Verify the last batch has correct joins
+	lastThree := rows[3:]
+	names := map[string]bool{}
+	for _, r := range lastThree {
+		names[getString(r, "name")] = true
+	}
+	if !names["user_1"] || !names["user_42"] || !names["user_500"] {
+		t.Errorf("expected user_1, user_42, user_500; got %v", names)
+	}
+}
+
+func TestAccessPatternSQLiteAttachBatch(t *testing.T) {
+	// Verify SQLite ATTACH works in batch mode (no OVER).
+	dbPath := createTestSQLiteDB(t, "products",
+		`CREATE TABLE products (id INTEGER, name TEXT, price REAL)`,
+		[]string{
+			`INSERT INTO products VALUES (1, 'Widget', 9.99)`,
+			`INSERT INTO products VALUES (2, 'Gadget', 24.99)`,
+			`INSERT INTO products VALUES (3, 'Doohickey', 14.99)`,
+		},
+	)
+
+	src, err := source.NewSQLiteSource("products", dbPath, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Join with an in-memory source
+	orders := newStaticChan("orders",
+		source.Record{"order_id": float64(1), "product_id": float64(1), "qty": float64(2)},
+		source.Record{"order_id": float64(2), "product_id": float64(3), "qty": float64(1)},
+	)
+
+	rows := parseAndExec(t,
+		"SELECT p.name, o.qty FROM orders o JOIN products p ON o.product_id = p.id ORDER BY o.order_id",
+		orders, src,
+	)
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(rows))
+	}
+	if getString(rows[0], "name") != "Widget" {
+		t.Errorf("first row: got %s, want Widget", getString(rows[0], "name"))
+	}
+	if getString(rows[1], "name") != "Doohickey" {
+		t.Errorf("second row: got %s, want Doohickey", getString(rows[1], "name"))
+	}
+}
+
+func TestAccessPatternSQLiteTableOverrideAttach(t *testing.T) {
+	// Verify ATTACH works when the SQLite table name differs from the source name
+	// (i.e., ?table=real_name was used).
+	dbPath := createTestSQLiteDB(t, "real_users",
+		`CREATE TABLE real_users (id INTEGER, name TEXT)`,
+		[]string{
+			`INSERT INTO real_users VALUES (1, 'Alice')`,
+			`INSERT INTO real_users VALUES (2, 'Bob')`,
+		},
+	)
+
+	// Source name is "users" but actual table is "real_users"
+	src, err := source.NewSQLiteSource("users", dbPath, "real_users")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stream, feed := newStreamChan("events")
+	go func() {
+		feed <- source.Record{"user_id": float64(1), "action": "login"}
+		feed <- source.Record{"user_id": float64(2), "action": "click"}
+		close(feed)
+	}()
+
+	sel := parseQuery(t, "SELECT u.name, e.action FROM events e JOIN users u ON e.user_id = u.id OVER 1h")
+	var buf bytes.Buffer
+	eng := New(&buf)
+	eng.AddSource(stream)
+	eng.AddSource(src)
+
+	if err := eng.Execute(sel); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	rows := parseOutput(t, buf.String())
+	if len(rows) != 3 {
+		t.Fatalf("expected 3 output rows (1+2), got %d", len(rows))
+	}
+
+	// Verify last pair has correct joins
+	lastTwo := rows[1:]
+	foundAlice, foundBob := false, false
+	for _, r := range lastTwo {
+		if getString(r, "name") == "Alice" {
+			foundAlice = true
+		}
+		if getString(r, "name") == "Bob" {
+			foundBob = true
+		}
+	}
+	if !foundAlice || !foundBob {
+		t.Errorf("expected Alice and Bob; alice=%v bob=%v", foundAlice, foundBob)
+	}
+}
+
+func TestAccessPatternIndexedLookup(t *testing.T) {
+	// Verify indexed access: only matching batch rows are inserted per window.
+	// Uses a file (chanSource) source in a JOIN with a streaming source.
+	users := newStaticChan("users",
+		source.Record{"id": float64(1), "name": "Alice"},
+		source.Record{"id": float64(2), "name": "Bob"},
+		source.Record{"id": float64(3), "name": "Charlie"},
+		source.Record{"id": float64(4), "name": "Diana"},
+		source.Record{"id": float64(5), "name": "Eve"},
+	)
+
+	stream, feed := newStreamChan("events")
+	go func() {
+		// Only reference user_ids 1 and 3 — users 2,4,5 should never be inserted
+		feed <- source.Record{"user_id": float64(1), "action": "login"}
+		feed <- source.Record{"user_id": float64(3), "action": "click"}
+		close(feed)
+	}()
+
+	sel := parseQuery(t, "SELECT u.name, e.action FROM events e JOIN users u ON e.user_id = u.id OVER 1h")
+	var buf bytes.Buffer
+	eng := New(&buf)
+	eng.AddSource(stream)
+	eng.AddSource(users)
+
+	if err := eng.Execute(sel); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	rows := parseOutput(t, buf.String())
+	// After 2 inserts: 1 + 2 = 3 output rows
+	if len(rows) != 3 {
+		t.Fatalf("expected 3 output rows, got %d", len(rows))
+	}
+
+	// Verify only Alice and Charlie appear (indexed access only inserts matching rows)
+	names := map[string]bool{}
+	for _, r := range rows {
+		names[getString(r, "name")] = true
+	}
+	if !names["Alice"] || !names["Charlie"] {
+		t.Errorf("expected Alice and Charlie; got %v", names)
+	}
+	if names["Bob"] || names["Diana"] || names["Eve"] {
+		t.Errorf("unexpected names in output: %v", names)
+	}
+}
+
+func TestAccessPatternFullScanFallback(t *testing.T) {
+	// Verify batch table in FROM clause uses full scan (not indexed).
+	// When a static table is the primary scan target (FROM), it must be fully loaded.
+	users := newStaticChan("users",
+		source.Record{"id": float64(1), "name": "Alice"},
+		source.Record{"id": float64(2), "name": "Bob"},
+		source.Record{"id": float64(3), "name": "Charlie"},
+	)
+
+	stream, feed := newStreamChan("events")
+	go func() {
+		feed <- source.Record{"user_id": float64(1), "action": "login"}
+		close(feed)
+	}()
+
+	// Note: users is in FROM (primary), events is JOINed
+	sel := parseQuery(t, "SELECT u.name, e.action FROM users u JOIN events e ON u.id = e.user_id OVER 1h")
+	var buf bytes.Buffer
+	eng := New(&buf)
+	eng.AddSource(stream)
+	eng.AddSource(users)
+
+	if err := eng.Execute(sel); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	rows := parseOutput(t, buf.String())
+	if len(rows) == 0 {
+		t.Fatal("expected output rows from full-scan fallback")
+	}
+
+	// Should find Alice+login
+	found := false
+	for _, r := range rows {
+		if getString(r, "name") == "Alice" && getString(r, "action") == "login" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected Alice+login in output")
+	}
+}
+
+func TestAccessPatternLeftJoinIndexed(t *testing.T) {
+	// LEFT JOIN with indexed batch table: unmatched streaming rows get NULLs.
+	users := newStaticChan("users",
+		source.Record{"id": float64(1), "name": "Alice"},
+		source.Record{"id": float64(2), "name": "Bob"},
+	)
+
+	stream, feed := newStreamChan("events")
+	go func() {
+		feed <- source.Record{"user_id": float64(1), "action": "login"}
+		feed <- source.Record{"user_id": float64(99), "action": "ghost"} // no matching user
+		close(feed)
+	}()
+
+	sel := parseQuery(t, "SELECT e.action, u.name FROM events e LEFT JOIN users u ON e.user_id = u.id OVER 1h")
+	var buf bytes.Buffer
+	eng := New(&buf)
+	eng.AddSource(stream)
+	eng.AddSource(users)
+
+	if err := eng.Execute(sel); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	rows := parseOutput(t, buf.String())
+	// After 2 inserts: 1 + 2 = 3 output rows
+	if len(rows) != 3 {
+		t.Fatalf("expected 3 output rows, got %d", len(rows))
+	}
+
+	// Verify last batch: login→Alice, ghost→NULL
+	lastTwo := rows[1:]
+	foundAlice, foundGhostNull := false, false
+	for _, r := range lastTwo {
+		if getString(r, "action") == "login" && getString(r, "name") == "Alice" {
+			foundAlice = true
+		}
+		if getString(r, "action") == "ghost" && r["name"] == nil {
+			foundGhostNull = true
+		}
+	}
+	if !foundAlice {
+		t.Error("expected login+Alice join row")
+	}
+	if !foundGhostNull {
+		t.Error("expected ghost+NULL join row (LEFT JOIN)")
+	}
+}
+
+func TestAccessPatternMixed(t *testing.T) {
+	// Mix all three access patterns: SQLite attached + file indexed + file full-scan.
+	// categories: SQLite source (attached)
+	dbPath := createTestSQLiteDB(t, "categories",
+		`CREATE TABLE categories (id INTEGER, cat_name TEXT)`,
+		[]string{
+			`INSERT INTO categories VALUES (1, 'Electronics')`,
+			`INSERT INTO categories VALUES (2, 'Books')`,
+		},
+	)
+	categories, err := source.NewSQLiteSource("categories", dbPath, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// users: static chanSource in JOIN → indexed
+	users := newStaticChan("users",
+		source.Record{"id": float64(1), "name": "Alice"},
+		source.Record{"id": float64(2), "name": "Bob"},
+	)
+
+	// events: streaming source
+	stream, feed := newStreamChan("events")
+	go func() {
+		feed <- source.Record{"user_id": float64(1), "cat_id": float64(1), "action": "buy"}
+		feed <- source.Record{"user_id": float64(2), "cat_id": float64(2), "action": "browse"}
+		close(feed)
+	}()
+
+	sel := parseQuery(t,
+		"SELECT u.name, c.cat_name, e.action FROM events e JOIN users u ON e.user_id = u.id JOIN categories c ON e.cat_id = c.id OVER 1h")
+	var buf bytes.Buffer
+	eng := New(&buf)
+	eng.AddSource(stream)
+	eng.AddSource(users)
+	eng.AddSource(categories)
+
+	if err := eng.Execute(sel); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	rows := parseOutput(t, buf.String())
+	if len(rows) != 3 {
+		t.Fatalf("expected 3 output rows (1+2), got %d", len(rows))
+	}
+
+	// Verify last batch
+	lastTwo := rows[1:]
+	foundAliceElectronics, foundBobBooks := false, false
+	for _, r := range lastTwo {
+		if getString(r, "name") == "Alice" && getString(r, "cat_name") == "Electronics" {
+			foundAliceElectronics = true
+		}
+		if getString(r, "name") == "Bob" && getString(r, "cat_name") == "Books" {
+			foundBobBooks = true
+		}
+	}
+	if !foundAliceElectronics {
+		t.Error("expected Alice+Electronics")
+	}
+	if !foundBobBooks {
+		t.Error("expected Bob+Books")
+	}
+}
+
+func TestAccessPatternAnalyzeBatchAccess(t *testing.T) {
+	// Unit test for AnalyzeBatchAccess — verify classification of each source.
+
+	// Create a SQLite source
+	dbPath := createTestSQLiteDB(t, "lookup",
+		`CREATE TABLE lookup (code TEXT, label TEXT)`,
+		[]string{`INSERT INTO lookup VALUES ('A', 'Alpha')`},
+	)
+	sqliteSrc, err := source.NewSQLiteSource("lookup", dbPath, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// File source in JOIN → should be indexed
+	fileSrc := newStaticChan("users",
+		source.Record{"id": float64(1), "name": "Alice"},
+	)
+
+	// Streaming source
+	streamSrc, _ := newStreamChan("events")
+
+	sources := map[string]source.Source{
+		"lookup": sqliteSrc,
+		"users":  fileSrc,
+		"events": streamSrc,
+	}
+
+	sel := parseQuery(t, "SELECT u.name, l.label FROM events e JOIN users u ON e.user_id = u.id JOIN lookup l ON e.code = l.code OVER 1h")
+	plan := AnalyzeBatchAccess(sel, sources)
+
+	// lookup should be AccessAttached
+	if plan["lookup"] == nil || plan["lookup"].Access != AccessAttached {
+		t.Errorf("lookup: expected AccessAttached, got %+v", plan["lookup"])
+	}
+	if plan["lookup"] != nil && plan["lookup"].AttachPath != dbPath {
+		t.Errorf("lookup attach path: got %s, want %s", plan["lookup"].AttachPath, dbPath)
+	}
+
+	// users should be AccessIndexed
+	if plan["users"] == nil || plan["users"].Access != AccessIndexed {
+		t.Errorf("users: expected AccessIndexed, got %+v", plan["users"])
+	}
+	if plan["users"] != nil {
+		if plan["users"].JoinCol != "id" {
+			t.Errorf("users join col: got %s, want id", plan["users"].JoinCol)
+		}
+		if plan["users"].StreamCol != "user_id" {
+			t.Errorf("users stream col: got %s, want user_id", plan["users"].StreamCol)
+		}
+	}
+}
+
+func TestAccessPatternFullScanForBatchInFROM(t *testing.T) {
+	// Verify that a batch table in FROM is classified as AccessFullScan.
+	fileSrc := newStaticChan("users",
+		source.Record{"id": float64(1), "name": "Alice"},
+	)
+	streamSrc, _ := newStreamChan("events")
+
+	sources := map[string]source.Source{
+		"users":  fileSrc,
+		"events": streamSrc,
+	}
+
+	sel := parseQuery(t, "SELECT u.name FROM users u JOIN events e ON u.id = e.user_id OVER 1h")
+	plan := AnalyzeBatchAccess(sel, sources)
+
+	if plan["users"] == nil || plan["users"].Access != AccessFullScan {
+		t.Errorf("users in FROM: expected AccessFullScan, got %+v", plan["users"])
 	}
 }
 

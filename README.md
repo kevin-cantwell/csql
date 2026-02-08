@@ -261,6 +261,20 @@ CGO_ENABLED=0 go build -ldflags="-s -w" -o csql ./cmd/csql
 
 ## Architecture
 
-The engine is a series of in-memory SQLite databases. In batch mode (no `OVER`), all sources load into a single database. In streaming mode, each time window gets its own database. Static sources (files, SQLite databases) are loaded once and attached via `ATTACH DATABASE`, so they aren't duplicated across windows.
+The engine is a series of in-memory SQLite databases. In batch mode (no `OVER`), all sources load into a single database. In streaming mode, each time window gets its own database.
 
 Multiple streaming sources are supported -- their record channels are merged and records are routed to the correct table by name.
+
+### Lazy batch source loading
+
+In streaming mode, the engine analyzes the query to choose the most efficient loading strategy for each batch (static) source:
+
+| Strategy | When | How |
+|----------|------|-----|
+| **ATTACH** | SQLite sources | The original `.db` file is ATTACHed directly to each window database. Zero copying -- SQLite handles indexing and lookup natively. |
+| **Indexed** | File/JSONL sources used only via equi-join (`a.col = b.col`) | Records are read into a Go hash map keyed on the join column. Only matching rows are inserted into each window database on demand as streaming records arrive. |
+| **Full scan** | File sources in FROM clause, or non-equi-joins | Pre-loaded into a shared static database and ATTACHed to each window (unchanged from before). |
+
+This means a 1M-row SQLite lookup table used in a `JOIN ... ON` never gets copied into memory -- it stays on disk and SQLite queries it directly. A large CSV used in an equi-join only inserts the rows that actually match incoming stream records.
+
+In batch mode (no `OVER`), SQLite sources are also ATTACHed directly rather than copied row-by-row.
