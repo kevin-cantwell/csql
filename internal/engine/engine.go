@@ -72,6 +72,10 @@ func (e *Engine) executeBatch(stmt *ast.SelectStatement) error {
 	// Execute
 	rows, err := db.Query(sqlStr)
 	if err != nil {
+		// A source with 0 records never creates its table — treat as empty result.
+		if isNoSuchTableErr(err) {
+			return nil
+		}
 		return fmt.Errorf("query: %w\nSQL: %s", err, sqlStr)
 	}
 	defer rows.Close()

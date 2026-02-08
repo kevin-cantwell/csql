@@ -3,8 +3,11 @@ package engine
 import (
 	"bufio"
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -12,6 +15,7 @@ import (
 
 	"github.com/kevin-cantwell/csql/internal/ast"
 	"github.com/kevin-cantwell/csql/internal/source"
+	_ "modernc.org/sqlite"
 )
 
 // --- test helpers ---
@@ -533,6 +537,610 @@ func TestBatchIsNotNull(t *testing.T) {
 	if len(rows) != 2 {
 		t.Fatalf("IS NOT NULL: expected 2 rows, got %d", len(rows))
 	}
+}
+
+// =======================
+// SQLITE BATCH SOURCE
+// =======================
+
+// createTestSQLiteDB creates a temporary SQLite database file with the given
+// table populated. Returns the path; cleaned up via t.Cleanup.
+func createTestSQLiteDB(t *testing.T, tableName string, ddl string, inserts []string) string {
+	t.Helper()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open test db: %v", err)
+	}
+	defer db.Close()
+
+	if _, err := db.Exec(ddl); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	for _, ins := range inserts {
+		if _, err := db.Exec(ins); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+	}
+
+	return dbPath
+}
+
+func TestSQLiteSelectStar(t *testing.T) {
+	dbPath := createTestSQLiteDB(t, "customers",
+		`CREATE TABLE customers (id INTEGER, name TEXT, city TEXT)`,
+		[]string{
+			`INSERT INTO customers VALUES (1, 'Alice', 'NYC')`,
+			`INSERT INTO customers VALUES (2, 'Bob', 'SF')`,
+			`INSERT INTO customers VALUES (3, 'Charlie', 'NYC')`,
+		},
+	)
+
+	src, err := source.NewSQLiteSource("customers", dbPath, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := parseAndExec(t, "SELECT * FROM customers", src)
+	if len(rows) != 3 {
+		t.Fatalf("expected 3 rows, got %d", len(rows))
+	}
+}
+
+func TestSQLiteWhere(t *testing.T) {
+	dbPath := createTestSQLiteDB(t, "products",
+		`CREATE TABLE products (id INTEGER, name TEXT, price REAL, in_stock INTEGER)`,
+		[]string{
+			`INSERT INTO products VALUES (1, 'Widget', 9.99, 1)`,
+			`INSERT INTO products VALUES (2, 'Gadget', 24.99, 0)`,
+			`INSERT INTO products VALUES (3, 'Doohickey', 14.99, 1)`,
+			`INSERT INTO products VALUES (4, 'Thingamajig', 4.99, 1)`,
+		},
+	)
+
+	src, err := source.NewSQLiteSource("products", dbPath, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := parseAndExec(t, "SELECT name, price FROM products WHERE price > 10 ORDER BY price", src)
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(rows))
+	}
+	if getString(rows[0], "name") != "Doohickey" {
+		t.Errorf("first row: got %s, want Doohickey", getString(rows[0], "name"))
+	}
+}
+
+func TestSQLiteTableOverride(t *testing.T) {
+	// The table in the DB is "real_table" but the source name is "data".
+	// We use ?table=real_table to tell the source which table to read.
+	dbPath := createTestSQLiteDB(t, "real_table",
+		`CREATE TABLE real_table (id INTEGER, val TEXT)`,
+		[]string{
+			`INSERT INTO real_table VALUES (1, 'alpha')`,
+			`INSERT INTO real_table VALUES (2, 'beta')`,
+		},
+	)
+
+	src, err := source.NewSQLiteSource("data", dbPath, "real_table")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := parseAndExec(t, "SELECT * FROM data ORDER BY id", src)
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(rows))
+	}
+	if getString(rows[0], "val") != "alpha" {
+		t.Errorf("first row val: got %s, want alpha", getString(rows[0], "val"))
+	}
+}
+
+func TestSQLiteJoinCSV(t *testing.T) {
+	// SQLite source joined with CSV file source
+	dbPath := createTestSQLiteDB(t, "departments",
+		`CREATE TABLE departments (id INTEGER, dept_name TEXT, budget REAL)`,
+		[]string{
+			`INSERT INTO departments VALUES (1, 'Engineering', 500000)`,
+			`INSERT INTO departments VALUES (2, 'Marketing', 200000)`,
+			`INSERT INTO departments VALUES (3, 'Sales', 300000)`,
+		},
+	)
+
+	depts, err := source.NewSQLiteSource("departments", dbPath, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// employees via chanSource
+	employees := newStaticChan("employees",
+		source.Record{"name": "Alice", "dept_id": float64(1)},
+		source.Record{"name": "Bob", "dept_id": float64(2)},
+		source.Record{"name": "Charlie", "dept_id": float64(1)},
+		source.Record{"name": "Diana", "dept_id": float64(3)},
+	)
+
+	rows := parseAndExec(t,
+		"SELECT e.name, d.dept_name FROM employees e JOIN departments d ON e.dept_id = d.id ORDER BY e.name",
+		employees, depts,
+	)
+	if len(rows) != 4 {
+		t.Fatalf("expected 4 rows, got %d", len(rows))
+	}
+	if getString(rows[0], "dept_name") != "Engineering" {
+		t.Errorf("Alice dept: got %s, want Engineering", getString(rows[0], "dept_name"))
+	}
+	if getString(rows[1], "dept_name") != "Marketing" {
+		t.Errorf("Bob dept: got %s, want Marketing", getString(rows[1], "dept_name"))
+	}
+}
+
+func TestSQLiteJoinSQLite(t *testing.T) {
+	// Two SQLite sources joined together
+	dbPath1 := createTestSQLiteDB(t, "authors",
+		`CREATE TABLE authors (id INTEGER, name TEXT)`,
+		[]string{
+			`INSERT INTO authors VALUES (1, 'Tolkien')`,
+			`INSERT INTO authors VALUES (2, 'Hemingway')`,
+			`INSERT INTO authors VALUES (3, 'Austen')`,
+		},
+	)
+	dbPath2 := createTestSQLiteDB(t, "books",
+		`CREATE TABLE books (id INTEGER, title TEXT, author_id INTEGER, year INTEGER)`,
+		[]string{
+			`INSERT INTO books VALUES (1, 'The Hobbit', 1, 1937)`,
+			`INSERT INTO books VALUES (2, 'The Old Man and the Sea', 2, 1952)`,
+			`INSERT INTO books VALUES (3, 'Pride and Prejudice', 3, 1813)`,
+			`INSERT INTO books VALUES (4, 'The Lord of the Rings', 1, 1954)`,
+		},
+	)
+
+	authors, err := source.NewSQLiteSource("authors", dbPath1, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	books, err := source.NewSQLiteSource("books", dbPath2, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rows := parseAndExec(t,
+		"SELECT a.name, b.title, b.year FROM books b JOIN authors a ON b.author_id = a.id ORDER BY b.year",
+		books, authors,
+	)
+	if len(rows) != 4 {
+		t.Fatalf("expected 4 rows, got %d", len(rows))
+	}
+	if getString(rows[0], "title") != "Pride and Prejudice" {
+		t.Errorf("oldest book: got %s, want Pride and Prejudice", getString(rows[0], "title"))
+	}
+	if getString(rows[3], "name") != "Tolkien" {
+		t.Errorf("newest author: got %s, want Tolkien", getString(rows[3], "name"))
+	}
+}
+
+func TestSQLiteGroupBy(t *testing.T) {
+	dbPath := createTestSQLiteDB(t, "sales",
+		`CREATE TABLE sales (id INTEGER, region TEXT, amount REAL)`,
+		[]string{
+			`INSERT INTO sales VALUES (1, 'East', 100)`,
+			`INSERT INTO sales VALUES (2, 'West', 200)`,
+			`INSERT INTO sales VALUES (3, 'East', 150)`,
+			`INSERT INTO sales VALUES (4, 'West', 300)`,
+			`INSERT INTO sales VALUES (5, 'East', 50)`,
+		},
+	)
+
+	src, err := source.NewSQLiteSource("sales", dbPath, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := parseAndExec(t,
+		"SELECT region, COUNT(*) cnt, SUM(amount) total FROM sales GROUP BY region ORDER BY region",
+		src,
+	)
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(rows))
+	}
+	if getString(rows[0], "region") != "East" || getFloat(rows[0], "cnt") != 3 || getFloat(rows[0], "total") != 300 {
+		t.Errorf("East: got cnt=%v total=%v", rows[0]["cnt"], rows[0]["total"])
+	}
+	if getString(rows[1], "region") != "West" || getFloat(rows[1], "cnt") != 2 || getFloat(rows[1], "total") != 500 {
+		t.Errorf("West: got cnt=%v total=%v", rows[1]["cnt"], rows[1]["total"])
+	}
+}
+
+func TestSQLiteLeftJoin(t *testing.T) {
+	dbPath := createTestSQLiteDB(t, "teams",
+		`CREATE TABLE teams (id INTEGER, team_name TEXT)`,
+		[]string{
+			`INSERT INTO teams VALUES (1, 'Red')`,
+			`INSERT INTO teams VALUES (2, 'Blue')`,
+			`INSERT INTO teams VALUES (3, 'Green')`,
+		},
+	)
+	teams, err := source.NewSQLiteSource("teams", dbPath, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Only some teams have members
+	members := newStaticChan("members",
+		source.Record{"name": "Alice", "team_id": float64(1)},
+		source.Record{"name": "Bob", "team_id": float64(1)},
+		source.Record{"name": "Charlie", "team_id": float64(2)},
+	)
+
+	rows := parseAndExec(t,
+		"SELECT t.team_name, m.name FROM teams t LEFT JOIN members m ON t.id = m.team_id ORDER BY t.team_name, m.name",
+		teams, members,
+	)
+	// Red: Alice, Bob; Blue: Charlie; Green: NULL
+	if len(rows) != 4 {
+		t.Fatalf("expected 4 rows, got %d", len(rows))
+	}
+	// Green team should have NULL member
+	greenFound := false
+	for _, r := range rows {
+		if getString(r, "team_name") == "Green" {
+			greenFound = true
+			if r["name"] != nil {
+				t.Errorf("Green team should have NULL name, got %v", r["name"])
+			}
+		}
+	}
+	if !greenFound {
+		t.Error("Green team not found in LEFT JOIN results")
+	}
+}
+
+func TestSQLiteNullHandling(t *testing.T) {
+	dbPath := createTestSQLiteDB(t, "data",
+		`CREATE TABLE data (id INTEGER, value TEXT, score REAL)`,
+		[]string{
+			`INSERT INTO data VALUES (1, 'a', 10.0)`,
+			`INSERT INTO data VALUES (2, NULL, 20.0)`,
+			`INSERT INTO data VALUES (3, 'c', NULL)`,
+			`INSERT INTO data VALUES (4, NULL, NULL)`,
+		},
+	)
+
+	src, err := source.NewSQLiteSource("data", dbPath, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := parseAndExec(t, "SELECT id FROM data WHERE value IS NULL ORDER BY id", src)
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows with NULL value, got %d", len(rows))
+	}
+	if getFloat(rows[0], "id") != 2 || getFloat(rows[1], "id") != 4 {
+		t.Errorf("NULL rows: got ids %v, %v; want 2, 4", rows[0]["id"], rows[1]["id"])
+	}
+}
+
+func TestSQLiteColumnTypes(t *testing.T) {
+	// Verify INTEGER, REAL, TEXT types come through correctly
+	dbPath := createTestSQLiteDB(t, "typed",
+		`CREATE TABLE typed (int_col INTEGER, real_col REAL, text_col TEXT)`,
+		[]string{
+			`INSERT INTO typed VALUES (42, 3.14, 'hello')`,
+		},
+	)
+
+	src, err := source.NewSQLiteSource("typed", dbPath, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := parseAndExec(t, "SELECT * FROM typed", src)
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(rows))
+	}
+	r := rows[0]
+	if getFloat(r, "int_col") != 42 {
+		t.Errorf("int_col: got %v, want 42", r["int_col"])
+	}
+	if getFloat(r, "real_col") != 3.14 {
+		t.Errorf("real_col: got %v, want 3.14", r["real_col"])
+	}
+	if getString(r, "text_col") != "hello" {
+		t.Errorf("text_col: got %v, want hello", r["text_col"])
+	}
+}
+
+func TestSQLiteStreamJoin(t *testing.T) {
+	// Stream source joined with SQLite batch source using OVER
+	dbPath := createTestSQLiteDB(t, "users",
+		`CREATE TABLE users (id INTEGER, name TEXT, role TEXT)`,
+		[]string{
+			`INSERT INTO users VALUES (1, 'Alice', 'admin')`,
+			`INSERT INTO users VALUES (2, 'Bob', 'user')`,
+			`INSERT INTO users VALUES (3, 'Charlie', 'user')`,
+		},
+	)
+
+	users, err := source.NewSQLiteSource("users", dbPath, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stream, feed := newStreamChan("events")
+	go func() {
+		feed <- source.Record{"user_id": float64(1), "action": "deploy"}
+		feed <- source.Record{"user_id": float64(2), "action": "login"}
+		feed <- source.Record{"user_id": float64(1), "action": "restart"}
+		close(feed)
+	}()
+
+	sel := parseQuery(t, "SELECT u.name, u.role, e.action FROM events e JOIN users u ON e.user_id = u.id OVER 1h")
+	var buf bytes.Buffer
+	eng := New(&buf)
+	eng.AddSource(stream)
+	eng.AddSource(users)
+
+	if err := eng.Execute(sel); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	rows := parseOutput(t, buf.String())
+	// After 3 inserts: 1 + 2 + 3 = 6 output rows
+	if len(rows) != 6 {
+		t.Fatalf("expected 6 output rows, got %d", len(rows))
+	}
+
+	// Verify last batch has correct joins
+	lastThree := rows[3:]
+	foundAdminDeploy := false
+	foundUserLogin := false
+	for _, r := range lastThree {
+		if getString(r, "name") == "Alice" && getString(r, "role") == "admin" {
+			foundAdminDeploy = true
+		}
+		if getString(r, "name") == "Bob" && getString(r, "role") == "user" {
+			foundUserLogin = true
+		}
+	}
+	if !foundAdminDeploy {
+		t.Error("missing Alice/admin join")
+	}
+	if !foundUserLogin {
+		t.Error("missing Bob/user join")
+	}
+}
+
+func TestSQLiteURIParsing(t *testing.T) {
+	tests := []struct {
+		name   string
+		uri    string
+		path   string
+		table  string
+		scheme string
+	}{
+		{
+			name: "basic", uri: "sqlite:///tmp/test.db",
+			path: "/tmp/test.db", table: "", scheme: "sqlite",
+		},
+		{
+			name: "with_table", uri: "sqlite:///tmp/test.db?table=customers",
+			path: "/tmp/test.db", table: "customers", scheme: "sqlite",
+		},
+		{
+			name: "relative", uri: "sqlite://data/my.db",
+			path: "data/my.db", table: "", scheme: "sqlite",
+		},
+		{
+			name: "relative_with_table", uri: "sqlite://data/my.db?table=orders",
+			path: "data/my.db", table: "orders", scheme: "sqlite",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := source.ParseURI("src", tt.uri)
+			if err != nil {
+				t.Fatalf("ParseURI(%q): %v", tt.uri, err)
+			}
+			if cfg.Scheme != tt.scheme {
+				t.Errorf("scheme: got %q, want %q", cfg.Scheme, tt.scheme)
+			}
+			if cfg.URI != tt.path {
+				t.Errorf("path: got %q, want %q", cfg.URI, tt.path)
+			}
+			if cfg.Table != tt.table {
+				t.Errorf("table: got %q, want %q", cfg.Table, tt.table)
+			}
+		})
+	}
+}
+
+func TestSQLiteEmptyTable(t *testing.T) {
+	dbPath := createTestSQLiteDB(t, "empty",
+		`CREATE TABLE empty (id INTEGER, name TEXT)`,
+		nil,
+	)
+
+	src, err := source.NewSQLiteSource("empty", dbPath, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := parseAndExec(t, "SELECT * FROM empty", src)
+	if len(rows) != 0 {
+		t.Errorf("expected 0 rows from empty table, got %d", len(rows))
+	}
+}
+
+func TestSQLiteLargeTable(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "large.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Exec(`CREATE TABLE nums (id INTEGER, val REAL)`)
+	tx, _ := db.Begin()
+	for i := 0; i < 1000; i++ {
+		tx.Exec(`INSERT INTO nums VALUES (?, ?)`, i, float64(i)*1.1)
+	}
+	tx.Commit()
+	db.Close()
+
+	src, err := source.NewSQLiteSource("nums", dbPath, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := parseAndExec(t, "SELECT COUNT(*) cnt, SUM(val) total FROM nums", src)
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(rows))
+	}
+	if getFloat(rows[0], "cnt") != 1000 {
+		t.Errorf("count: got %v, want 1000", rows[0]["cnt"])
+	}
+}
+
+func TestSQLiteEndToEnd(t *testing.T) {
+	// Full end-to-end: SQLite source + CSV source + stream, three-way join
+	dbPath := createTestSQLiteDB(t, "categories",
+		`CREATE TABLE categories (id INTEGER, cat_name TEXT)`,
+		[]string{
+			`INSERT INTO categories VALUES (1, 'Electronics')`,
+			`INSERT INTO categories VALUES (2, 'Books')`,
+			`INSERT INTO categories VALUES (3, 'Clothing')`,
+		},
+	)
+
+	categories, err := source.NewSQLiteSource("categories", dbPath, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	items := newStaticChan("items",
+		source.Record{"name": "Laptop", "cat_id": float64(1), "price": float64(999)},
+		source.Record{"name": "Novel", "cat_id": float64(2), "price": float64(15)},
+		source.Record{"name": "Shirt", "cat_id": float64(3), "price": float64(30)},
+		source.Record{"name": "Phone", "cat_id": float64(1), "price": float64(699)},
+	)
+
+	rows := parseAndExec(t,
+		"SELECT i.name, c.cat_name, i.price FROM items i JOIN categories c ON i.cat_id = c.id ORDER BY i.price DESC",
+		items, categories,
+	)
+	if len(rows) != 4 {
+		t.Fatalf("expected 4 rows, got %d", len(rows))
+	}
+	if getString(rows[0], "name") != "Laptop" {
+		t.Errorf("most expensive: got %s, want Laptop", getString(rows[0], "name"))
+	}
+	if getString(rows[0], "cat_name") != "Electronics" {
+		t.Errorf("Laptop category: got %s, want Electronics", getString(rows[0], "cat_name"))
+	}
+}
+
+func TestSQLiteNonEOFStreamJoin(t *testing.T) {
+	// Non-EOF stream joined with SQLite source
+	dbPath := createTestSQLiteDB(t, "lookup",
+		`CREATE TABLE lookup (code TEXT, label TEXT)`,
+		[]string{
+			`INSERT INTO lookup VALUES ('A', 'Alpha')`,
+			`INSERT INTO lookup VALUES ('B', 'Beta')`,
+			`INSERT INTO lookup VALUES ('C', 'Charlie')`,
+		},
+	)
+
+	lookup, err := source.NewSQLiteSource("lookup", dbPath, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stream, feed := newStreamChan("events")
+
+	sel := parseQuery(t, "SELECT e.msg, l.label FROM events e JOIN lookup l ON e.code = l.code OVER 1h")
+	pr, pw := io.Pipe()
+	eng := New(pw)
+	eng.AddSource(stream)
+	eng.AddSource(lookup)
+
+	var engineErr error
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		engineErr = eng.Execute(sel)
+		pw.Close()
+	}()
+
+	scanner := bufio.NewScanner(pr)
+
+	// First event
+	feed <- source.Record{"code": "A", "msg": "first"}
+	if !scanWithTimeout(scanner, 2*time.Second) {
+		t.Fatal("timed out after first event")
+	}
+	var r map[string]interface{}
+	json.Unmarshal(scanner.Bytes(), &r)
+	if getString(r, "label") != "Alpha" {
+		t.Errorf("first join label: got %s, want Alpha", getString(r, "label"))
+	}
+
+	// Delayed second event
+	time.Sleep(50 * time.Millisecond)
+	feed <- source.Record{"code": "C", "msg": "second"}
+	// Should get 2 rows (full re-query)
+	gotAlpha, gotCharlie := false, false
+	for i := 0; i < 2; i++ {
+		if !scanWithTimeout(scanner, 2*time.Second) {
+			t.Fatal("timed out after second event")
+		}
+		json.Unmarshal(scanner.Bytes(), &r)
+		if getString(r, "label") == "Alpha" {
+			gotAlpha = true
+		}
+		if getString(r, "label") == "Charlie" {
+			gotCharlie = true
+		}
+	}
+	if !gotAlpha || !gotCharlie {
+		t.Errorf("expected Alpha and Charlie; alpha=%v charlie=%v", gotAlpha, gotCharlie)
+	}
+
+	close(feed)
+	for scanWithTimeout(scanner, 500*time.Millisecond) {
+	}
+	wg.Wait()
+	if engineErr != nil {
+		t.Fatalf("engine error: %v", engineErr)
+	}
+}
+
+// Also test that ParseURI auto-detects .db/.sqlite/.sqlite3 as sqlite scheme
+func TestSQLiteFileExtensionDetection(t *testing.T) {
+	// Create a real db file to test with
+	dbPath := createTestSQLiteDB(t, "test",
+		`CREATE TABLE test (x INTEGER)`,
+		[]string{`INSERT INTO test VALUES (1)`},
+	)
+
+	// Rename to .db extension
+	dbDir := filepath.Dir(dbPath)
+	for _, ext := range []string{".db", ".sqlite", ".sqlite3"} {
+		newPath := filepath.Join(dbDir, "data"+ext)
+		if err := copyFile(dbPath, newPath); err != nil {
+			t.Fatalf("copy to %s: %v", ext, err)
+		}
+		src, err := source.NewSQLiteSource("test", newPath, "test")
+		if err != nil {
+			t.Fatalf("NewSQLiteSource with %s: %v", ext, err)
+		}
+		rows := parseAndExec(t, "SELECT * FROM test", src)
+		if len(rows) != 1 {
+			t.Errorf("extension %s: expected 1 row, got %d", ext, len(rows))
+		}
+	}
+}
+
+func copyFile(src, dst string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, data, 0644)
 }
 
 // ======================
